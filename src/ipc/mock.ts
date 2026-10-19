@@ -11,6 +11,7 @@ import type {
   SearchResult,
   DocumentMeta,
   VaultInfo,
+  OpenPathResult,
   DocLinks,
   TagEntry,
   SpeechApi,
@@ -324,6 +325,19 @@ export function createMockBackend(): WindMDBackend {
         fileCount: [...files.keys()].filter(ext).length,
       };
       return vaultRoot;
+    },
+
+    // 浏览器 dev 模式没有真实文件关联,这三项只在 Tauri 下有意义
+    async openPath(_path: string): Promise<OpenPathResult> {
+      throw new Error('浏览器模式不支持打开本地文件');
+    },
+
+    async takeOpenFile(): Promise<string | null> {
+      return null;
+    },
+
+    onOpenFile() {
+      return () => {};
     },
 
     async listFiles(dir: string): Promise<FileEntry[]> {

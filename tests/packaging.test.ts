@@ -33,6 +33,25 @@ describe('打包配置(tauri.conf.json)', () => {
     expect(ico.readUInt16LE(2)).toBe(1); // 类型 1 = 图标
   });
 
+  it('注册 Markdown 文件关联(安装后可选为默认打开方式)', () => {
+    const assoc = (conf.bundle.fileAssociations ?? []) as Array<{
+      ext?: string[];
+      mimeType?: string;
+      role?: string;
+    }>;
+    const exts = assoc.flatMap((a) => a.ext ?? []);
+    for (const ext of ['md', 'markdown', 'mdown']) {
+      expect(exts, `缺少 .${ext} 关联`).toContain(ext);
+    }
+    const markdown = assoc.find((a) => a.ext?.includes('md'));
+    expect(markdown?.mimeType).toBe('text/markdown');
+    expect(markdown?.role).toBe('Viewer');
+  });
+
+  it('依赖单实例插件:第二个进程把文件路径转交给已开窗口', () => {
+    expect(cargo).toContain('tauri-plugin-single-instance');
+  });
+
   it('NSis 当前用户安装(免管理员),安装界面带中英文', () => {
     expect(conf.bundle.windows?.nsis?.installMode).toBe('currentUser');
     expect(conf.bundle.windows?.nsis?.languages).toContain('SimpChinese');

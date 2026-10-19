@@ -30,6 +30,15 @@
     "targets": ["nsis", "msi", "dmg", "deb", "appimage"],
     "icon": ["icons/icon.ico", "icons/icon.png"],
     "category": "Productivity",
+    "fileAssociations": [
+      {
+        "ext": ["md", "markdown", "mdown"],
+        "name": "Markdown Document",
+        "description": "Markdown Document",
+        "mimeType": "text/markdown",
+        "role": "Viewer"
+      }
+    ],
     "shortDescription": "本地优先的 Markdown 阅读器",
     "longDescription": "WindMD 是一款本地优先、高性能的 Markdown 阅读器,提供接近 IDE 级的大文件性能与接近出版级的阅读体验。",
     "windows": {

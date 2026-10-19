@@ -49,6 +49,13 @@ export interface VaultInfo {
   fileCount: number;
 }
 
+/** 打开系统送来的文件后,后端确定的库与库内相对路径 */
+export interface OpenPathResult {
+  vault: VaultInfo;
+  /** 目标文件相对库根的路径 */
+  path: string;
+}
+
 /** 一个双链目标:归一化目标 + 解析结果(null 表示目标文件尚未创建) */
 export interface LinkTarget {
   target: string;
@@ -131,6 +138,12 @@ export interface WindMDBackend {
 
   /* --- 库 / 文件 --- */
   openVault(path?: string): Promise<VaultInfo>;
+  /** 打开系统传入的绝对路径:以所在目录为库,并返回库内相对路径 */
+  openPath(path: string): Promise<OpenPathResult>;
+  /** 取走启动时待打开的外部文件路径(取后清空) */
+  takeOpenFile(): Promise<string | null>;
+  /** 运行中再次通过文件关联打开时通知 */
+  onOpenFile(cb: (path: string) => void): () => void;
   listFiles(dir: string): Promise<FileEntry[]>;
   readFile(path: string): Promise<OpenFile>;
   writeFile(path: string, content: string): Promise<void>;

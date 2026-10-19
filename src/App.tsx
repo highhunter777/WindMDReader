@@ -5,7 +5,7 @@ import { Suspense, lazy, useEffect, useState } from 'react';
 import { useStore } from './store';
 import { getBackend } from './ipc';
 import { scrollContainer } from './renderer/scroll';
-import { loadVaultContents, openVaultWithPicker } from './open-vault';
+import { openPathFromOS, openSavedVault, openVaultWithPicker } from './open-vault';
 import {
   ACTION_ORDER,
   SEQUENCE_WINDOW_MS,
@@ -44,21 +44,52 @@ export default function App() {
       // Promise rejection(会在控制台刷错误、测试里变成 unhandled error)
       try {
         const b = await getBackend();
-        // 优先复用上次的库;路径已失效(库被移动/删除)时回退到系统选择框
+        // 文件关联/命令行唤起:优先于上次的库
+        try {
+          const external = await b.takeOpenFile();
+          if (external) {
+            await openPathFromOS(external);
+            return;
+          }
+        } catch (e) {
+          console.error('打开关联文件失败', e);
+        }
+        // 复用上次的库;路径已失效(库被移动/删除)时回退到系统选择框
         const saved = localStorage.getItem('windmd-vault');
+        let opened = false;
         if (saved) {
           try {
-            await loadVaultContents(await b.openVault(saved));
-            return;
+            await openSavedVault(saved);
+            opened = true;
           } catch {
             /* 路径失效:走选择框 */
           }
         }
-        await openVaultWithPicker();
+        if (!opened) await openVaultWithPicker(false);
+
+        // 启动/索引期间第二个实例送来的文件可能早于事件监听注册:
+        // 路径一直留在后端,这里补取一次
+        try {
+          const late = await b.takeOpenFile();
+          if (late) await openPathFromOS(late);
+        } catch (e) {
+          console.error('打开关联文件失败', e);
+        }
       } catch (e) {
         console.error(e);
       }
     })();
+  }, []);
+
+  /* --- 运行中再次双击关联文档 --- */
+  useEffect(() => {
+    let unlistener: (() => void) | undefined;
+    void getBackend().then((b) => {
+      unlistener = b.onOpenFile((path) => {
+        void openPathFromOS(path).catch((e) => console.error('打开关联文件失败', e));
+      });
+    });
+    return () => unlistener?.();
   }, []);
 
   /* --- 文件监视 --- */

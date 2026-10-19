@@ -5,7 +5,7 @@
 
 use crate::db::{Db, DocRow};
 use crate::error::{AppError, Result};
-use crate::fs::{strip_ext, Fs};
+use crate::fs::{is_markdown, relativize, strip_ext, Fs};
 use crate::{indexer, search, tts, watcher};
 use serde::Serialize;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -20,6 +20,8 @@ pub struct AppState {
     db: Arc<Db>,
     tts: Arc<tts::Speaker>,
     inner: Mutex<Inner>,
+    /// 文件关联送来的绝对路径,等前端启动后取走
+    pending_open: Mutex<Option<String>>,
 }
 
 struct Inner {
@@ -37,7 +39,20 @@ impl AppState {
                 fs: None,
                 _watch: None,
             }),
+            pending_open: Mutex::new(None),
         }
+    }
+
+    /// 记录待打开文件(后到的覆盖先到的:一次只展示一篇)
+    pub fn set_pending_open(&self, path: String) {
+        if let Ok(mut p) = self.pending_open.lock() {
+            *p = Some(path);
+        }
+    }
+
+    /// 取走待打开文件;取后清空,避免前端重复打开
+    pub fn take_pending_open(&self) -> Option<String> {
+        self.pending_open.lock().ok().and_then(|mut p| p.take())
     }
 
     fn db(&self) -> &Arc<Db> {
@@ -184,16 +199,19 @@ pub fn open_vault(app: tauri::AppHandle, state: State<'_, AppState>, path: Optio
         Some(p) => p,
         None => pick_folder(&app)?,
     };
+    open_root(&app, &state, std::path::PathBuf::from(chosen))
+}
 
-    let root = std::path::PathBuf::from(&chosen);
+/// 打开(或切换)库根,重建索引并开启监视。
+/// `open_vault` 与文件关联的 `open_path` 共用。
+fn open_root(app: &tauri::AppHandle, state: &AppState, root: std::path::PathBuf) -> Result<VaultInfo> {
     if !root.is_dir() {
-        return Err(AppError::InvalidPath(chosen));
+        return Err(AppError::InvalidPath(root.to_string_lossy().to_string()));
     }
 
     let fs = Fs::new(root.clone());
     let info = vault_info(&root, &fs);
 
-    // 重建索引并开启监视
     let db = state.db().clone();
     let _ = indexer::reindex_all(&fs, &db);
     let _ = indexer::prune_missing(&fs, &db);
@@ -219,6 +237,99 @@ pub fn open_vault(app: tauri::AppHandle, state: State<'_, AppState>, path: Optio
     guard._watch = watch;
 
     Ok(info)
+}
+
+/// 取走启动时文件关联送来的路径(取后清空)
+#[tauri::command]
+pub fn take_open_file(state: State<'_, AppState>) -> Option<String> {
+    state.take_pending_open()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenPathResult {
+    pub vault: VaultInfo,
+    /// 目标文件相对库根的路径
+    pub path: String,
+}
+
+/// 打开系统送来的绝对文件路径:以所在目录为库,并定位到该文件。
+#[tauri::command]
+pub fn open_path(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<OpenPathResult> {
+    let abs = normalize_abs(&path)?;
+    let parent = abs
+        .parent()
+        .ok_or_else(|| AppError::InvalidPath(path.clone()))?
+        .to_path_buf();
+
+    // 文件就在当前库里(最常见:应用已开着):不重复重建索引
+    {
+        let guard = state.lock()?;
+        if let Some(fs) = guard.fs.as_ref() {
+            if same_dir(fs.root(), &parent) {
+                if let Some(rel) = relativize(fs.root(), &abs) {
+                    return Ok(OpenPathResult {
+                        vault: vault_info(fs.root(), fs),
+                        path: rel,
+                    });
+                }
+            }
+        }
+    }
+
+    let info = open_root(&app, &state, parent)?;
+    let rel = relativize(std::path::Path::new(&info.root), &abs)
+        .ok_or(AppError::InvalidPath(path))?;
+    Ok(OpenPathResult { vault: info, path: rel })
+}
+
+/// 文件关联给的是绝对路径;`canonicalize` 同时完成存在性校验。
+///
+/// Windows 会返回 `\\?\C:\...` 前缀,必须去掉 —— 否则之后拼库根/相对化
+/// 会得到带扩展前缀的路径,和常规路径对不上。
+fn normalize_abs(path: &str) -> Result<std::path::PathBuf> {
+    let p = std::path::PathBuf::from(path);
+    if !p.is_absolute() {
+        return Err(AppError::InvalidPath(path.to_string()));
+    }
+    let canonical = std::fs::canonicalize(&p).map_err(|_| AppError::NotFound(path.to_string()))?;
+    if !canonical.is_file()
+        || !canonical
+            .file_name()
+            .is_some_and(|n| is_markdown(&n.to_string_lossy()))
+    {
+        return Err(AppError::InvalidPath(path.to_string()));
+    }
+    Ok(strip_verbatim(canonical))
+}
+
+#[cfg(windows)]
+fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return std::path::PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return std::path::PathBuf::from(rest);
+    }
+    p
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim(p: std::path::PathBuf) -> std::path::PathBuf {
+    p
+}
+
+/// 两个目录是否同一位置(大小写/短路径/符号链接都按系统实际解析)
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
 }
 
 #[tauri::command]
@@ -462,4 +573,67 @@ pub fn tts_cancel(state: State<'_, AppState>) -> Result<()> {
 #[tauri::command]
 pub fn tts_supports_pause(state: State<'_, AppState>) -> bool {
     state.speaker().pause_capable()
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("windmd-open-path-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn 绝对路径的文档可规范化() {
+        let dir = tmp_dir("ok");
+        let file = dir.join("a.md");
+        std::fs::write(&file, "# a").unwrap();
+        let got = normalize_abs(&file.to_string_lossy()).unwrap();
+        assert!(got.is_file());
+        assert_eq!(got.file_name().unwrap(), "a.md");
+        #[cfg(windows)]
+        assert!(!got.to_string_lossy().starts_with(r"\\?\"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 相对路径与非文档被拒绝() {
+        let dir = tmp_dir("bad");
+        let img = dir.join("a.png");
+        std::fs::write(&img, "x").unwrap();
+        assert!(normalize_abs("a.md").is_err());
+        assert!(normalize_abs(&img.to_string_lossy()).is_err());
+        assert!(normalize_abs(&dir.join("missing.md").to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 同一目录可判等() {
+        let dir = tmp_dir("same");
+        assert!(same_dir(&dir, &dir.join(".")));
+        assert!(!same_dir(&dir, &dir.join("nested")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn 去掉windows扩展路径前缀() {
+        assert_eq!(
+            strip_verbatim(PathBuf::from(r"\\?\C:\notes\a.md")),
+            PathBuf::from(r"C:\notes\a.md")
+        );
+        assert_eq!(
+            strip_verbatim(PathBuf::from(r"\\?\UNC\server\share\a.md")),
+            PathBuf::from(r"\\server\share\a.md")
+        );
+        // 普通路径原样返回
+        assert_eq!(
+            strip_verbatim(PathBuf::from(r"C:\notes\a.md")),
+            PathBuf::from(r"C:\notes\a.md")
+        );
+    }
 }

@@ -11,6 +11,7 @@ import type {
   SearchResult,
   DocumentMeta,
   VaultInfo,
+  OpenPathResult,
   DocLinks,
   TagEntry,
   VoiceInfo,
@@ -33,6 +34,20 @@ export function createTauriBackend(): WindMDBackend {
     },
 
     openVault: (path?: string) => invoke<VaultInfo>('open_vault', { path: path ?? null }),
+    openPath: (path: string) => invoke<OpenPathResult>('open_path', { path }),
+    takeOpenFile: () => invoke<string | null>('take_open_file'),
+    onOpenFile(cb) {
+      let un: UnlistenFn | undefined;
+      let disposed = false;
+      listen<string>('open-file', (e) => cb(e.payload)).then((u) => {
+        if (disposed) u();
+        else un = u;
+      });
+      return () => {
+        disposed = true;
+        un?.();
+      };
+    },
     listFiles: (dir: string) => invoke<FileEntry[]>('list_files', { dir }),
     readFile: (path: string) => invoke<OpenFile>('read_file', { path }),
     writeFile: (path: string, content: string) => invoke('write_file', { path, content }),
