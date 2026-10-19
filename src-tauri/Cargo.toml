@@ -1,6 +1,6 @@
 [package]
 name = "windmd"
-version = "0.1.0"
+version = "0.1.1"
 description = "WindMD — 本地优先、高性能的 Markdown 阅读器"
 authors = ["WindMD"]
 edition = "2021"

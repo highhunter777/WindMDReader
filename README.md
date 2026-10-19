@@ -83,7 +83,7 @@ pwsh scripts/bundle-release.ps1      # 打出安装器(NSIS + MSI)
 - **前端**:Vite 6 · React 18 · TypeScript(strict)· Zustand · Vitest
 - **渲染**:markdown-it · Shiki · KaTeX · Mermaid · DOMPurify
 - **后端**:Tauri 2 · Rust · SQLite(rusqlite bundled,FTS5)· notify(文件监视)
-- **质量基线**:Vitest 451 + cargo test 86 全绿;首屏资源 347.8KB(350KB 红线内)
+- **质量基线**:Vitest 456 + cargo test 92 全绿;首屏资源 347.8KB(350KB 红线内)
 
 ## 项目结构
 
