@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <!--
+    Make WindMD discoverable as an "Open with" candidate and in Default Apps.
+    Tauri's generated ProgIDs only set the extension's default handler; Windows
+    hides apps that are not also listed in OpenWithProgids / RegisteredApplications.
+    This component never changes the user's default choice.
+  -->
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="WindMDShellIntegration" Guid="6454E932-6E5B-4A6C-B7D8-7017ECD0CB4B">
+        <RegistryKey Root="HKLM" Key="Software\Classes\.md\OpenWithProgids">
+          <RegistryValue Name="WindMD.md" Type="string" Value="" />
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="Software\Classes\.markdown\OpenWithProgids">
+          <RegistryValue Name="WindMD.markdown" Type="string" Value="" />
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="Software\Classes\.mdown\OpenWithProgids">
+          <RegistryValue Name="WindMD.mdown" Type="string" Value="" />
+        </RegistryKey>
+
+        <RegistryKey Root="HKLM" Key="Software\Classes\WindMD.md\DefaultIcon">
+          <RegistryValue Type="string" Value="[INSTALLDIR]windmd.exe,0" />
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="Software\Classes\WindMD.markdown\DefaultIcon">
+          <RegistryValue Type="string" Value="[INSTALLDIR]windmd.exe,0" />
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="Software\Classes\WindMD.mdown\DefaultIcon">
+          <RegistryValue Type="string" Value="[INSTALLDIR]windmd.exe,0" />
+        </RegistryKey>
+
+        <RegistryKey Root="HKLM" Key="Software\Classes\Applications\windmd.exe">
+          <RegistryValue Name="FriendlyAppName" Type="string" Value="WindMD" />
+          <RegistryValue Name="ApplicationCompany" Type="string" Value="WindMD" />
+          <RegistryValue Name="DefaultIcon" Type="string" Value="[INSTALLDIR]windmd.exe,0" />
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="Software\Classes\Applications\windmd.exe\SupportedTypes">
+          <RegistryValue Name=".md" Type="string" Value="" />
+          <RegistryValue Name=".markdown" Type="string" Value="" />
+          <RegistryValue Name=".mdown" Type="string" Value="" />
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="Software\Classes\Applications\windmd.exe\shell\open\command">
+          <RegistryValue Type="string" Value="&quot;[INSTALLDIR]windmd.exe&quot; &quot;%1&quot;" />
+        </RegistryKey>
+
+        <RegistryKey Root="HKLM" Key="Software\RegisteredApplications">
+          <RegistryValue Name="WindMD" Type="string" Value="Software\WindMD\Capabilities" KeyPath="yes" />
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="Software\WindMD\Capabilities">
+          <RegistryValue Name="ApplicationName" Type="string" Value="WindMD" />
+          <RegistryValue Name="ApplicationDescription" Type="string" Value="WindMD Markdown Reader" />
+          <RegistryValue Name="ApplicationIcon" Type="string" Value="[INSTALLDIR]windmd.exe,0" />
+        </RegistryKey>
+        <RegistryKey Root="HKLM" Key="Software\WindMD\Capabilities\FileAssociations">
+          <RegistryValue Name=".md" Type="string" Value="WindMD.md" />
+          <RegistryValue Name=".markdown" Type="string" Value="WindMD.markdown" />
+          <RegistryValue Name=".mdown" Type="string" Value="WindMD.mdown" />
+        </RegistryKey>
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

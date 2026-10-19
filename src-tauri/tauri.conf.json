@@ -45,7 +45,12 @@
       "webviewInstallMode": { "type": "downloadBootstrapper" },
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["SimpChinese", "English"]
+        "languages": ["SimpChinese", "English"],
+        "installerHooks": "windows/nsis-hooks.nsh"
+      },
+      "wix": {
+        "fragmentPaths": ["windows/shell-integration.wxs"],
+        "componentRefs": ["WindMDShellIntegration"]
       }
     }
   }

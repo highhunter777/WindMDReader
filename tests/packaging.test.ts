@@ -52,6 +52,22 @@ describe('打包配置(tauri.conf.json)', () => {
     expect(cargo).toContain('tauri-plugin-single-instance');
   });
 
+  it('安装器补充 OpenWithProgids / 默认应用候选注册', () => {
+    const hooksPath = conf.bundle.windows?.nsis?.installerHooks;
+    expect(hooksPath).toBeTruthy();
+    const hooks = readFileSync(join(root, 'src-tauri', hooksPath), 'utf8');
+    expect(hooks).toContain('OpenWithProgids');
+    expect(hooks).toContain('RegisteredApplications');
+    expect(hooks).toContain('NSIS_HOOK_POSTUNINSTALL');
+
+    const fragments = conf.bundle.windows?.wix?.fragmentPaths ?? [];
+    expect(fragments.length).toBeGreaterThan(0);
+    const fragment = readFileSync(join(root, 'src-tauri', fragments[0]), 'utf8');
+    expect(fragment).toContain('OpenWithProgids');
+    expect(fragment).toContain('RegisteredApplications');
+    expect(conf.bundle.windows?.wix?.componentRefs).toContain('WindMDShellIntegration');
+  });
+
   it('NSis 当前用户安装(免管理员),安装界面带中英文', () => {
     expect(conf.bundle.windows?.nsis?.installMode).toBe('currentUser');
     expect(conf.bundle.windows?.nsis?.languages).toContain('SimpChinese');
