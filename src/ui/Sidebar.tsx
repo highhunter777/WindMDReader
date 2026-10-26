@@ -66,6 +66,8 @@ interface TreeOps {
 
 function FileTree() {
   const [cache, setCache] = useState<Record<string, FileEntry[]>>({});
+  /** 缓存的最新快照:异步回调里读它,避免闭包拿到过期状态 */
+  const cacheRef = useRef<Record<string, FileEntry[]>>({});
   const activePath = useStore((s) => s.activePath);
   const vault = useStore((s) => s.vault);
   const [menu, setMenu] = useState<{ x: number; y: number; entry: FileEntry } | null>(null);
@@ -74,22 +76,47 @@ function FileTree() {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [error, setError] = useState('');
 
+  /** 合并写入缓存(状态与快照同步更新) */
+  const putCache = useCallback((updates: Record<string, FileEntry[]>) => {
+    cacheRef.current = { ...cacheRef.current, ...updates };
+    setCache((c) => ({ ...c, ...updates }));
+  }, []);
+
   /** 拉取(并缓存)某个目录的条目;force 时强制刷新 */
-  const loadDir = useCallback(async (dir: string, force = false) => {
-    if (!force && cache[dir]) return cache[dir];
-    const list = await (await getBackend()).listFiles(dir);
-    setCache((c) => ({ ...c, [dir]: list }));
-    return list;
-  }, [cache]);
+  const loadDir = useCallback(
+    async (dir: string, force = false) => {
+      if (!force && cacheRef.current[dir]) return cacheRef.current[dir];
+      const list = await (await getBackend()).listFiles(dir);
+      putCache({ [dir]: list });
+      return list;
+    },
+    [putCache],
+  );
 
   const refresh = useCallback(
     async (dir: string) => {
       const list = await (await getBackend()).listFiles(dir);
-      setCache((c) => ({ ...c, [dir]: list }));
+      putCache({ [dir]: list });
       setError('');
     },
-    [],
+    [putCache],
   );
+
+  /** 重新拉取所有已展开目录:外部改名/删除后让树与磁盘一致 */
+  const refreshAll = useCallback(async () => {
+    const dirs = Object.keys(cacheRef.current);
+    if (!dirs.length) return;
+    try {
+      const b = await getBackend();
+      const lists = await Promise.all(dirs.map((d) => b.listFiles(d)));
+      const updates: Record<string, FileEntry[]> = {};
+      dirs.forEach((d, i) => (updates[d] = lists[i]));
+      putCache(updates);
+      setError('');
+    } catch (e) {
+      setError(errMsg(e));
+    }
+  }, [putCache]);
 
   /* 根目录:等库就绪后再拉。
      库由 App 启动流程异步打开(首次可能还要弹系统选择框),若组件挂载就
@@ -97,20 +124,35 @@ function FileTree() {
      提示,且没有任何重试,树会一直空着。这里改为跟着 vault 走。 */
   useEffect(() => {
     if (!vault) return;
+    cacheRef.current = {};
     setCache({});
     void (async () => {
       try {
         const list = await (await getBackend()).listFiles('/');
-        setCache({ '/': list });
+        putCache({ '/': list });
         setError('');
       } catch (e) {
         setError(errMsg(e));
       }
     })();
-    // 不在此处调用 openVault():无路径的 openVault 会弹系统选择框,
-    // 组件重挂载时反复弹出会抢焦点、吞掉用户键入(表现为新建/重命名"无效")。
-    // 需要换库请点「打开库」。
-  }, [vault]);
+    // 不在此处调用 openVault():组件重挂载时反复弹框会抢焦点、
+    // 吞掉用户键入(表现为新建/重命名"无效")。需要换库请点「打开库」。
+  }, [vault, putCache]);
+
+  /* 外部变更(资源管理器改名/删除、编辑器保存)与窗口重新聚焦时刷新树。
+     notify 在个别文件系统上会漏事件,聚焦兜底。 */
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void getBackend().then((b) => {
+      unlisten = b.onFileChanged(() => void refreshAll());
+    });
+    const onFocus = () => void refreshAll();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      unlisten?.();
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [refreshAll]);
 
   const openFile = async (entry: FileEntry) => {
     try {
@@ -120,6 +162,12 @@ function FileTree() {
       useStore.getState().openDoc(f.path, f.content, meta);
     } catch (e) {
       setError(errMsg(e));
+      // 条目可能已在外部被改名/删除:立刻重拉所在目录,避免继续点旧路径
+      try {
+        await refresh(parentDir(entry.path));
+      } catch {
+        /* 忽略:错误条已提示 */
+      }
     }
   };
 
@@ -206,6 +254,7 @@ function FileTree() {
           activePath={activePath}
           depth={0}
           ops={ops}
+          cache={cache}
           loadDir={loadDir}
           onCreateIn={setCreatingIn}
           onRenameStart={(e) => setRenaming(e.path)}
@@ -263,6 +312,7 @@ function TreeNode({
   activePath,
   depth,
   ops,
+  cache,
   loadDir,
   onCreateIn,
   onRenameStart,
@@ -275,6 +325,8 @@ function TreeNode({
   activePath: string | null;
   depth: number;
   ops: TreeOps;
+  /** 各目录的条目缓存:子项直接读它,外部变更刷新后自动重绘 */
+  cache: Record<string, FileEntry[]>;
   loadDir: (dir: string, force?: boolean) => Promise<FileEntry[]>;
   onCreateIn: (dir: string) => void;
   onRenameStart: (e: FileEntry) => void;
@@ -282,9 +334,19 @@ function TreeNode({
   onAskDelete: (e: FileEntry) => void;
   onContextMenu: (x: number, y: number, e: FileEntry) => void;
 }) {
-  const [expanded, setExpanded] = useState(depth === 0);
-  const [children, setChildren] = useState<FileEntry[]>([]);
+  // 默认收起:大库里根层可能有几十个目录,启动时只列根目录,
+  // 子目录等用户展开再拉(懒加载)。
+  const [expanded, setExpanded] = useState(false);
+  const children = cache[entry.path] ?? [];
   const isMarkdown = hasTextExt(entry.name);
+
+  /* 展开时拉取一次;已有缓存则直接复用 */
+  useEffect(() => {
+    if (!entry.isDir || !expanded) return;
+    void loadDir(entry.path).catch(() => {
+      /* 读取失败时保留空列表 */
+    });
+  }, [entry.isDir, entry.path, expanded, loadDir]);
 
   const createFileIn = async (dir: string, name: string) => {
     const trimmed = name.trim();
@@ -293,8 +355,7 @@ function TreeNode({
     try {
       const b = await getBackend();
       await b.createFile(path);
-      const list = await b.listFiles(dir);
-      setChildren(list);
+      await loadDir(dir, true);
       ops.setCreatingIn(null);
       await onOpen({ path, name, isDir: false, kind: 'file' });
     } catch (e) {
@@ -303,20 +364,12 @@ function TreeNode({
     }
   };
 
-  const toggle = async () => {
+  const toggle = () => {
     if (!entry.isDir) {
       onOpen(entry);
       return;
     }
-    const next = !expanded;
-    setExpanded(next);
-    if (next && !children.length) {
-      try {
-        setChildren(await loadDir(entry.path));
-      } catch {
-        /* 读取失败时保留空列表,错误由打开文件路径呈现 */
-      }
-    }
+    setExpanded(!expanded);
   };
 
   return (
@@ -358,6 +411,7 @@ function TreeNode({
               activePath={activePath}
               depth={depth + 1}
               ops={ops}
+              cache={cache}
               loadDir={loadDir}
               onCreateIn={onCreateIn}
               onRenameStart={onRenameStart}

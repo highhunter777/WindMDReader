@@ -149,6 +149,13 @@ impl Db {
         Ok(rows)
     }
 
+    /// 已索引文档数(库信息展示用;不走文件系统遍历)
+    pub fn count_docs(&self) -> rusqlite::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get(0))?;
+        Ok(n as usize)
+    }
+
     /// 全部文档路径(用于清理已删除文件的残留记录)
     pub fn all_paths(&self) -> rusqlite::Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();

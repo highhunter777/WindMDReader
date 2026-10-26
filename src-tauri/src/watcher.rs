@@ -1,9 +1,10 @@
-//! 文件监视:监听库目录内的 .md 变更,事件节流后批量派发 `file-changed`。
+//! 文件监视:监听库目录内的文档与目录结构变更,事件节流后批量派发 `file-changed`。
 //!
 //! 大量文件同时保存(如 git checkout)会产生事件风暴,
 //! 因此用「静默窗口 + 路径去重」合并后再发给前端。
 
 use crate::fs::{is_markdown, relativize};
+use notify::event::ModifyKind;
 use notify::{EventKind, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::Path;
@@ -42,9 +43,15 @@ where
         ) {
             return;
         }
+        // 新建/删除/改名会改变文件树结构(目录、非文档文件也算),
+        // 内容修改则只关心文档 —— 否则编辑器保存图片等也会刷一次树。
+        let structural = matches!(
+            event.kind,
+            EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+        );
         for abs in event.paths {
-            // 只关心文档文件,且必须是库内路径
-            if !is_markdown(&abs.to_string_lossy()) {
+            // 必须是库内路径
+            if !structural && !is_markdown(&abs.to_string_lossy()) {
                 continue;
             }
             if let Some(rel) = relativize(&watch_root, &abs) {

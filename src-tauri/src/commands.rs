@@ -8,6 +8,7 @@ use crate::error::{AppError, Result};
 use crate::fs::{is_markdown, relativize, strip_ext, Fs};
 use crate::{indexer, search, tts, watcher};
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, State};
@@ -22,6 +23,8 @@ pub struct AppState {
     inner: Mutex<Inner>,
     /// 文件关联送来的绝对路径,等前端启动后取走
     pending_open: Mutex<Option<String>>,
+    /// 打开库的代次:后台索引据此判断自己是否已被后续的切库取代
+    vault_gen: AtomicU64,
 }
 
 struct Inner {
@@ -40,6 +43,7 @@ impl AppState {
                 _watch: None,
             }),
             pending_open: Mutex::new(None),
+            vault_gen: AtomicU64::new(0),
         }
     }
 
@@ -169,32 +173,23 @@ fn now_ms() -> i64 {
 
 /* ---------- commands ---------- */
 
-fn vault_info(root: &std::path::Path, fs: &Fs) -> VaultInfo {
+fn vault_info(root: &std::path::Path, file_count: usize) -> VaultInfo {
     VaultInfo {
         name: root
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| root.to_string_lossy().to_string()),
         root: root.to_string_lossy().to_string(),
-        file_count: fs.count_markdown(),
+        file_count,
     }
 }
 
 /// 打开(或切换到)一个库目录。为空时弹系统对话框选择。
 ///
-/// **幂等**:无路径且库已打开时直接返回当前库信息,不弹框。
-/// 前端组件重挂载会幂等调用本命令;若每次都弹模态框,会抢走焦点、
-/// 吞掉用户随后的输入(如新建文件时的键入),表现为"操作无效"。
-#[tauri::command]
+/// 无路径时**总是**弹选择框:这是「打开库」按钮/Ctrl+O 的唯一入口。
+/// 若沿用「库已打开就直接返回当前库」的幂等逻辑,按钮点下去会毫无反应。
+#[tauri::command(async)]
 pub fn open_vault(app: tauri::AppHandle, state: State<'_, AppState>, path: Option<String>) -> Result<VaultInfo> {
-    let has_path = path.as_deref().is_some_and(|p| !p.is_empty());
-    if !has_path {
-        let guard = state.lock()?;
-        if let Some(fs) = guard.fs.as_ref() {
-            return Ok(vault_info(fs.root(), fs));
-        }
-    }
-
     let chosen = match path.filter(|p| !p.is_empty()) {
         Some(p) => p,
         None => pick_folder(&app)?,
@@ -209,12 +204,12 @@ fn open_root(app: &tauri::AppHandle, state: &AppState, root: std::path::PathBuf)
         return Err(AppError::InvalidPath(root.to_string_lossy().to_string()));
     }
 
-    let fs = Fs::new(root.clone());
-    let info = vault_info(&root, &fs);
+    // 先递增代次:此前的后台索引任务从此停手
+    let gen = state.vault_gen.fetch_add(1, Ordering::SeqCst) + 1;
 
-    let db = state.db().clone();
-    let _ = indexer::reindex_all(&fs, &db);
-    let _ = indexer::prune_missing(&fs, &db);
+    let fs = Fs::new(root.clone());
+    // file_count 仅用于展示,启动时不该为此遍历全库;先用已索引数量
+    let info = vault_info(&root, state.db().count_docs().unwrap_or(0));
 
     let app_for_watch = app.clone();
     let watch = watcher::start(&root, move |paths| {
@@ -225,7 +220,10 @@ fn open_root(app: &tauri::AppHandle, state: &AppState, root: std::path::PathBuf)
         let Ok(inner) = tauri_state.lock() else { return };
         let Some(fs) = inner.fs.as_ref() else { return };
         for p in &paths {
-            indexer::index_one(fs, &tauri_state.db, p);
+            // 目录/非文档变更也用于文件树同步,但只有文档需要重建索引
+            if is_markdown(p) {
+                indexer::index_one(fs, &tauri_state.db, p);
+            }
         }
         drop(inner);
         let _ = app_for_watch.emit("file-changed", paths);
@@ -235,6 +233,24 @@ fn open_root(app: &tauri::AppHandle, state: &AppState, root: std::path::PathBuf)
     let mut guard = state.lock()?;
     guard.fs = Some(fs);
     guard._watch = watch;
+    drop(guard);
+
+    // 全量索引放到后台:大库可能要读成千上万个文件,
+    // 放在 command 线程里会让打开库迟迟不返回(表现为启动无响应)。
+    // 切库后旧任务在下一个文件处自行停止,不会把旧库的数据写进新库。
+    let db = state.db().clone();
+    let app_for_index = app.clone();
+    std::thread::spawn(move || {
+        let Some(st) = app_for_index.try_state::<AppState>() else {
+            return;
+        };
+        let current = || st.vault_gen.load(Ordering::SeqCst) == gen;
+        let fs = Fs::new(root);
+        let _ = indexer::reindex_all(&fs, &db, || current());
+        if current() {
+            let _ = indexer::prune_missing(&fs, &db);
+        }
+    });
 
     Ok(info)
 }
@@ -254,7 +270,7 @@ pub struct OpenPathResult {
 }
 
 /// 打开系统送来的绝对文件路径:以所在目录为库,并定位到该文件。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_path(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -273,7 +289,7 @@ pub fn open_path(
             if same_dir(fs.root(), &parent) {
                 if let Some(rel) = relativize(fs.root(), &abs) {
                     return Ok(OpenPathResult {
-                        vault: vault_info(fs.root(), fs),
+                        vault: vault_info(fs.root(), state.db().count_docs().unwrap_or(0)),
                         path: rel,
                     });
                 }
@@ -332,12 +348,12 @@ fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_files(state: State<'_, AppState>, dir: String) -> Result<Vec<crate::fs::FileEntry>> {
     state.require_fs()?.fs.as_ref().expect("已校验").list(&dir)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_file(state: State<'_, AppState>, path: String) -> Result<crate::fs::OpenFile> {
     state.require_fs()?.fs.as_ref().expect("已校验").read(&path)
 }
@@ -382,7 +398,7 @@ pub fn rename_file(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn search(state: State<'_, AppState>, query: String) -> Result<search::SearchResult> {
     search::search(state.db(), &query, 50)
 }

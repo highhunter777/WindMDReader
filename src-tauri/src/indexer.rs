@@ -10,13 +10,22 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 /// 全量重建索引。返回已索引的文档数。
-pub fn reindex_all(fs: &Fs, db: &Arc<Db>) -> rusqlite::Result<usize> {
+///
+/// `keep_going` 每篇检查一次:切库后旧任务能及时停手,不把旧库数据写进新库。
+pub fn reindex_all(
+    fs: &Fs,
+    db: &Arc<Db>,
+    mut keep_going: impl FnMut() -> bool,
+) -> rusqlite::Result<usize> {
     let mut count = 0usize;
     for abs in walkdir::WalkDir::new(fs.root())
         .into_iter()
         .filter_map(std::result::Result::ok)
         .filter(|e| e.file_type().is_file())
     {
+        if !keep_going() {
+            break;
+        }
         let name = abs.file_name().to_string_lossy().to_string();
         if !is_markdown(&name) {
             continue;
@@ -36,7 +45,8 @@ pub fn reindex_all(fs: &Fs, db: &Arc<Db>) -> rusqlite::Result<usize> {
 /// 返回是否真的写了索引(用于统计)。
 pub fn index_one(fs: &Fs, db: &Arc<Db>, rel_path: &str) -> bool {
     let Ok(meta) = std::fs::metadata(fs.root().join(rel_path)) else {
-        // 文件可能已被删除,顺手清掉索引与元数据
+        // 文件可能已被删除;只清全文索引,元数据留给 prune_missing,
+        // 避免编辑器原子保存时的瞬时缺失把收藏/阅读进度一起删掉
         let _ = db.remove_from_index(rel_path);
         return false;
     };

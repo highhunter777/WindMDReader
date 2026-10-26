@@ -199,16 +199,6 @@ impl Fs {
         }
         .map_err(|e| AppError::Io(format!("删除失败: {e}")))
     }
-
-    /// 统计库内文档数量
-    pub fn count_markdown(&self) -> usize {
-        walkdir::WalkDir::new(&self.root)
-            .into_iter()
-            .filter_map(std::result::Result::ok)
-            .filter(|e| e.file_type().is_file())
-            .filter(|e| is_markdown(&e.file_name().to_string_lossy()))
-            .count()
-    }
 }
 
 /// 送 Windows 回收站;非 Windows 或调用失败时返回 Err,由调用方退回直接删除
@@ -415,18 +405,6 @@ mod tests {
         fs::write(dir.join("b.md"), "x").unwrap();
         let entries = Fs::new(&dir).list("/").unwrap();
         assert!(entries[0].is_dir);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn 统计文档数量() {
-        let dir = tmp_dir("count");
-        let fsx = Fs::new(&dir);
-        fsx.write("a.md", "1").unwrap();
-        fsx.write("b.md", "2").unwrap();
-        fsx.write("c.txt", "3").unwrap();
-        fs::write(dir.join("d.png"), "x").unwrap();
-        assert_eq!(fsx.count_markdown(), 3);
         let _ = fs::remove_dir_all(&dir);
     }
 

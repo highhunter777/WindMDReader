@@ -99,11 +99,16 @@ export default function App() {
       unlistener = b.onFileChanged((paths) => {
         const active = useStore.getState().activePath;
         if (active && paths.includes(active)) {
-          void b.readFile(active).then((f) => {
-            if (useStore.getState().activePath === active) {
-              useStore.getState().openDoc(f.path, f.content, useStore.getState().meta);
-            }
-          });
+          void b
+            .readFile(active)
+            .then((f) => {
+              if (useStore.getState().activePath === active) {
+                useStore.getState().openDoc(f.path, f.content, useStore.getState().meta);
+              }
+            })
+            .catch(() => {
+              // 文件已在外部被删除/改名:树会随即刷新,正文保持现状即可
+            });
         }
       });
     });

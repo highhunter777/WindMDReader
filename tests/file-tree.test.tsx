@@ -30,7 +30,16 @@ beforeEach(async () => {
   // 清掉上个用例遗留的测试文件,保证列表可预期
   const b = await getBackend();
   await b.openVault(TEST_VAULT.root);
-  for (const p of ['树测-新文件.md', '树测-重命名.md', '树测-删除我.md', '树测-失焦创建.md', '树测-旧名.md', '树测-失敏改名.md']) {
+  for (const p of [
+    '树测-新文件.md',
+    '树测-重命名.md',
+    '树测-删除我.md',
+    '树测-失焦创建.md',
+    '树测-旧名.md',
+    '树测-失敏改名.md',
+    '树测-外部改名.md',
+    '树测-外部改名-新.md',
+  ]) {
     try {
       await b.deleteFile(p);
     } catch {
@@ -178,6 +187,43 @@ describe('Sidebar — 重命名', () => {
     await flush();
     expect(screen.queryByText('树测-旧名.md')).toBeNull();
     expect(screen.getByText('树测-失敏改名.md')).toBeInTheDocument();
+  });
+});
+
+/**
+ * 回归:文件在资源管理器里改名/删除后,文件树必须跟着变。
+ * 真实环境靠 watcher 的 file-changed 事件驱动,这里用 mock 的同一事件通道模拟。
+ */
+describe('Sidebar — 外部变更同步', () => {
+  it('外部改名后自动换成新名字', async () => {
+    const b = await getBackend();
+    await b.writeFile('树测-外部改名.md', '内容');
+    render(<Sidebar />);
+    await flush();
+    expect(screen.getByText('树测-外部改名.md')).toBeInTheDocument();
+
+    await act(async () => {
+      await b.renameFile('树测-外部改名.md', '树测-外部改名-新.md');
+    });
+    await flush();
+
+    expect(screen.queryByText('树测-外部改名.md')).toBeNull();
+    expect(screen.getByText('树测-外部改名-新.md')).toBeInTheDocument();
+  });
+
+  it('外部删除后条目消失,不再可点', async () => {
+    const b = await getBackend();
+    await b.writeFile('树测-外部改名.md', '内容');
+    render(<Sidebar />);
+    await flush();
+    expect(screen.getByText('树测-外部改名.md')).toBeInTheDocument();
+
+    await act(async () => {
+      await b.deleteFile('树测-外部改名.md');
+    });
+    await flush();
+
+    expect(screen.queryByText('树测-外部改名.md')).toBeNull();
   });
 });
 

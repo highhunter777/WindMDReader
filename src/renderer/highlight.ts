@@ -1,5 +1,9 @@
 /**
  * Shiki 代码高亮(视口内懒渲染 + LRU 缓存)。
+ *
+ * 使用 JavaScript 正则引擎而非默认的 Oniguruma WASM:打包后的 Tauri 页面带
+ * 严格 CSP,WebView2 会拒绝编译 WASM,默认引擎会让所有代码块退化为纯文本。
+ *
  * shiki 与其语言/主题包体积较大且只在视口内渲染,故动态 import。
  */
 import type { Highlighter } from 'shiki';
@@ -17,14 +21,24 @@ let loading: Promise<Highlighter> | null = null;
 async function getHighlighter(): Promise<Highlighter> {
   if (highlighter) return highlighter;
   if (!loading) {
-    loading = import('shiki')
-      .then(({ createHighlighter }) =>
-        createHighlighter({
-          themes: ['github-light', 'github-dark'],
-          langs: LANGS,
-        }),
-      )
-      .then((h) => (highlighter = h));
+    loading = (async () => {
+      const [core, engine, themes, langs] = await Promise.all([
+        import('shiki/core'),
+        import('shiki/engine/javascript'),
+        import('shiki/themes'),
+        import('shiki/langs'),
+      ]);
+      const createHighlighter = core.createBundledHighlighter({
+        langs: langs.bundledLanguages,
+        themes: themes.bundledThemes,
+        engine: () => engine.createJavaScriptRegexEngine(),
+      });
+      highlighter = await createHighlighter({
+        themes: ['github-light', 'github-dark'],
+        langs: LANGS,
+      });
+      return highlighter;
+    })();
   }
   return loading;
 }
