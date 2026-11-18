@@ -17,6 +17,7 @@ import {
   defaultFetchAsDataUrl,
   downloadBlob,
   exportFileName,
+  fitCanvasScale,
   formatExportDate,
   inlineImages,
   prepareExportBody,
@@ -561,5 +562,27 @@ describe('downloadBlob', () => {
       delete urlObj.revokeObjectURL;
       vi.useRealTimers();
     }
+  });
+});
+
+describe('长图画布尺寸(防卡死)', () => {
+  it('正常情况下保持请求的缩放倍数', () => {
+    expect(fitCanvasScale(860, 2000, 2)).toBe(2);
+  });
+
+  it('超长文档自动降级,保证画布不越界', () => {
+    // 860 宽 × 40000 高的超长文档,2x 会得到 80000px,必然越界
+    const scale = fitCanvasScale(860, 40_000, 2);
+    expect(scale).toBeLessThan(2);
+    expect(Math.round(40_000 * scale)).toBeLessThanOrEqual(30_000);
+  });
+
+  it('极窄画布也不会被放大到超过上限', () => {
+    const scale = fitCanvasScale(100, 100, 2);
+    expect(scale).toBe(2);
+  });
+
+  it('退化尺寸下仍有下界,不会算出 0 或负数', () => {
+    expect(fitCanvasScale(10, 1_000_000, 2)).toBeGreaterThan(0);
   });
 });

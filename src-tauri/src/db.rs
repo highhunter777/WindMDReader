@@ -13,14 +13,27 @@ const SELECT_COLS: &str =
     "SELECT path, title, size, mtime, read_progress, starred, last_read_at";
 
 /// 数据库包装。Mutex 保证 rusqlite::Connection 的 Send 约束。
+///
+/// 单连接的代价:后台索引 / 文件监视 / 前台每次读写都排在同一把锁上。
+/// 为此在连接上设置 `busy_timeout`,并让前台写操作走独立的短事务,
+/// 避免"后台正忙 → 前台调用等到锁 → 界面无响应"。
 pub struct Db {
     conn: Mutex<Connection>,
 }
 
+/// 等待数据库锁的上限。
+///
+/// WAL 模式下读不会被写阻塞,真正会排队的是写-写。设为 5s:
+/// 足够让前台等后台一次索引事务结束,而不是立刻抛 SQLITE_BUSY 或长挂。
+const BUSY_TIMEOUT_MS: u64 = 5_000;
+
 impl Db {
     pub fn open(path: &Path) -> rusqlite::Result<Self> {
+        let conn = Connection::open(path)?;
+        // 索引线程与前台请求共用这一条连接:被锁住时等一会儿而不是立刻失败
+        conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
         let db = Db {
-            conn: Mutex::new(Connection::open(path)?),
+            conn: Mutex::new(conn),
         };
         db.migrate()?;
         Ok(db)
@@ -28,8 +41,10 @@ impl Db {
 
     /// 内存库,供测试与降级使用
     pub fn open_in_memory() -> rusqlite::Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
         let db = Db {
-            conn: Mutex::new(Connection::open_in_memory()?),
+            conn: Mutex::new(conn),
         };
         db.migrate()?;
         Ok(db)
@@ -288,7 +303,6 @@ impl Db {
             |r| r.get(0),
         )
         .optional()
-        .map_err(Into::into)
     }
 
     /// 全文检索。返回 (路径, 已用 `<mark>` 标记命中词的片段)。
@@ -296,6 +310,7 @@ impl Db {
     /// 索引使用 trigram 分词(见 migrate 注释),因此:
     /// - 查询须≥3 字符,否则 trigram 无法切分;
     /// - 查询串不能含 FTS5 语法字符与空白,否则整条查询报错。
+    ///
     /// 短查询退化为 LIKE 扫描,保证功能可用。
     ///
     /// 注意:trigram 下 FTS5 的 `snippet()`/`highlight()` **不插入标记**
@@ -394,11 +409,11 @@ fn mark_snippet(snippet: &str, needle: &str) -> String {
     // 用字节偏移切原串会在非 ASCII 文本上错位。
     while let Some(hit_chars) = find_ci(rest, &needle_lower) {
         let (head, tail) = split_at_chars(rest, hit_chars);
-        out.push_str(&escape_html(&head));
+        out.push_str(&escape_html(head));
 
         let (hit, after) = split_at_chars(tail, needle_lower.chars().count());
         out.push_str("<mark>");
-        out.push_str(&escape_html(&hit));
+        out.push_str(&escape_html(hit));
         out.push_str("</mark>");
         rest = after;
     }

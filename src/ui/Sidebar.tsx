@@ -648,27 +648,50 @@ function SearchPanel() {
   const [took, setTook] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  /** 每次输入自增:回来的旧结果据此判断自己是否已过期 */
+  const reqSeq = useRef(0);
+  const debounceTimer = useRef(0);
 
-  const search = async (q: string) => {
-    setQuery(q);
+  const runSearch = async (q: string) => {
+    const seq = ++reqSeq.current;
     if (!q.trim()) {
       setHits([]);
       setTotal(0);
+      setBusy(false);
       return;
     }
     setBusy(true);
     setError('');
     try {
       const r = await (await getBackend()).search(q.trim());
+      // 连续输入时可能有多个请求在途,只采纳最后一次的结果
+      if (seq !== reqSeq.current) return;
       setHits(r.hits);
       setTotal(r.total);
       setTook(r.tookMs);
     } catch (e) {
+      if (seq !== reqSeq.current) return;
       setError(errMsg(e));
     } finally {
-      setBusy(false);
+      if (seq === reqSeq.current) setBusy(false);
     }
   };
+
+  /**
+   * 输入即搜,但带防抖。
+   *
+   * 每敲一个键都直接发 IPC 的话,1~2 个字符会退化成全表 LIKE 扫描
+   * (实测 1000 篇/7MB 的库单次 46~69ms),连续输入就是持续卡顿。
+   * 250ms 静默窗口既能跟上手速,也避免把中间态都查一遍。
+   */
+  const onChange = (value: string) => {
+    setQuery(value);
+    window.clearTimeout(debounceTimer.current);
+    debounceTimer.current = window.setTimeout(() => void runSearch(value), 250);
+  };
+
+  /* 卸载时清掉未触发的防抖,避免对已卸载组件 setState */
+  useEffect(() => () => window.clearTimeout(debounceTimer.current), []);
 
   return (
     <div className="search-panel">
@@ -678,7 +701,7 @@ function SearchPanel() {
           autoFocus
           placeholder="全库搜索…"
           value={query}
-          onChange={(e) => void search(e.target.value)}
+          onChange={(e) => onChange(e.target.value)}
         />
       </div>
       {busy && <div className="search-status">搜索中…</div>}

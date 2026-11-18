@@ -80,6 +80,19 @@ impl AppState {
         Ok(guard)
     }
 
+    /// 取一份库句柄后立刻放锁。
+    ///
+    /// 文件读写、索引这类真正耗时的操作都该走这里:拿到的 `Fs` 只是一份
+    /// 路径克隆,不再占用全局状态锁,于是后台索引/监视器与前台请求
+    /// 不会因为同一把锁互相排队(那会表现为界面长时间"未响应")。
+    fn fs(&self) -> Result<Fs> {
+        let guard = self.require_fs()?;
+        guard
+            .fs
+            .clone()
+            .ok_or(AppError::NoVault)
+    }
+
     /// 取库引用但不要求已打开库(打开流程自身用)
     fn lock(&self) -> Result<MutexGuard<'_, Inner>> {
         self.inner
@@ -213,19 +226,28 @@ fn open_root(app: &tauri::AppHandle, state: &AppState, root: std::path::PathBuf)
 
     let app_for_watch = app.clone();
     let watch = watcher::start(&root, move |paths| {
-        // 变更后增量重建索引,再通知前端
+        // 变更后增量重建索引,再通知前端。
+        //
+        // 索引必须在**取出 fs 之后**做,不能持着 `inner` 锁跑:
+        // 编辑器批量保存 / git checkout 会一次送来上千个路径,
+        // 持锁逐篇写 FTS 期间,前台的 list_files / read_file / write_file
+        // 全部要排队等这把锁 —— 表现就是界面突然"未响应"。
         let Some(tauri_state) = app_for_watch.try_state::<AppState>() else {
             return;
         };
-        let Ok(inner) = tauri_state.lock() else { return };
-        let Some(fs) = inner.fs.as_ref() else { return };
+        let fs = {
+            let Ok(inner) = tauri_state.lock() else { return };
+            match inner.fs.clone() {
+                Some(fs) => fs,
+                None => return,
+            }
+        };
         for p in &paths {
             // 目录/非文档变更也用于文件树同步,但只有文档需要重建索引
             if is_markdown(p) {
-                indexer::index_one(fs, &tauri_state.db, p);
+                indexer::index_one(&fs, &tauri_state.db, p);
             }
         }
-        drop(inner);
         let _ = app_for_watch.emit("file-changed", paths);
     })
     .ok();
@@ -246,7 +268,7 @@ fn open_root(app: &tauri::AppHandle, state: &AppState, root: std::path::PathBuf)
         };
         let current = || st.vault_gen.load(Ordering::SeqCst) == gen;
         let fs = Fs::new(root);
-        let _ = indexer::reindex_all(&fs, &db, || current());
+        let _ = indexer::reindex_all(&fs, &db, &current);
         if current() {
             let _ = indexer::prune_missing(&fs, &db);
         }
@@ -350,51 +372,50 @@ fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
 
 #[tauri::command(async)]
 pub fn list_files(state: State<'_, AppState>, dir: String) -> Result<Vec<crate::fs::FileEntry>> {
-    state.require_fs()?.fs.as_ref().expect("已校验").list(&dir)
+    state.fs()?.list(&dir)
 }
 
 #[tauri::command(async)]
 pub fn read_file(state: State<'_, AppState>, path: String) -> Result<crate::fs::OpenFile> {
-    state.require_fs()?.fs.as_ref().expect("已校验").read(&path)
+    state.fs()?.read(&path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn write_file(state: State<'_, AppState>, path: String, content: String) -> Result<()> {
-    state.require_fs()?.fs.as_ref().expect("已校验").write(&path, &content)
+    state.fs()?.write(&path, &content)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_file(state: State<'_, AppState>, path: String) -> Result<()> {
-    let guard = state.require_fs()?;
-    let fs = guard.fs.as_ref().expect("已校验");
+    let fs = state.fs()?;
     fs.create(&path)?;
     // 建完立即补索引:否则要等 watcher 消抖后 getMeta 才查得到这一行,
     // 前端紧接着打开这篇时标题/元数据全是空的。与 watcher 的 index_one
     // 幂等(内容未变化则跳过),不会冲突。
-    indexer::index_one(fs, state.db(), &path);
+    // fs 已是脱离状态锁的克隆,索引期间不再挡住前台请求。
+    indexer::index_one(&fs, state.db(), &path);
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_file(state: State<'_, AppState>, path: String) -> Result<()> {
-    state.require_fs()?.fs.as_ref().expect("已校验").delete(&path)
+    state.fs()?.delete(&path)
 }
 
 /// 注意:`from`/`to` 是 Rust 关键字,故关闭 non_snake_case 检查。
 /// 前端传 `{ from, to }`,Tauri 原样映射。
-#[tauri::command]
+#[tauri::command(async)]
 #[allow(non_snake_case)]
 pub fn rename_file(
     state: State<'_, AppState>,
     from: String,
     to: String,
 ) -> Result<()> {
-    let guard = state.require_fs()?;
-    let fs = guard.fs.as_ref().expect("已校验");
+    let fs = state.fs()?;
     fs.rename(&from, &to)?;
     // 同 create_file:立即索引新路径,前端重命名后随即重开时元数据不缺
     // (旧路径行由 watcher 的 index_one 清理:metadata 失败即 remove_from_index)
-    indexer::index_one(fs, state.db(), &to);
+    indexer::index_one(&fs, state.db(), &to);
     Ok(())
 }
 
@@ -403,12 +424,12 @@ pub fn search(state: State<'_, AppState>, query: String) -> Result<search::Searc
     search::search(state.db(), &query, 50)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_meta(state: State<'_, AppState>, path: String) -> Result<Option<DocumentMeta>> {
     Ok(state.db().get_meta(&path)?.map(to_meta))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_meta(state: State<'_, AppState>, path: String, patch: MetaPatch) -> Result<()> {
     let existing = state.db().get_meta(&path)?;
     let name = path.rsplit('/').next().unwrap_or(&path);
@@ -433,7 +454,7 @@ pub fn set_meta(state: State<'_, AppState>, path: String, patch: MetaPatch) -> R
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn recent_files(state: State<'_, AppState>, limit: Option<usize>) -> Result<Vec<DocumentMeta>> {
     Ok(state
         .db()
@@ -443,7 +464,7 @@ pub fn recent_files(state: State<'_, AppState>, limit: Option<usize>) -> Result<
         .collect())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn starred_files(state: State<'_, AppState>) -> Result<Vec<DocumentMeta>> {
     Ok(state.db().starred()?.into_iter().map(to_meta).collect())
 }
@@ -457,11 +478,11 @@ fn resolve_target(db: &Db, target: &str) -> rusqlite::Result<Option<String>> {
         }
     }
     // 标题匹配:同名文档可放在任意目录
-    Ok(db.find_by_title(target)?)
+    db.find_by_title(target)
 }
 
 /// 某文档的双链视图:出链(含解析状态)与反链
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_links(state: State<'_, AppState>, path: String) -> Result<DocLinks> {
     let db = state.db();
     let outgoing = db
@@ -484,7 +505,7 @@ pub fn get_links(state: State<'_, AppState>, path: String) -> Result<DocLinks> {
 }
 
 /// 全库标签聚合
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_tags(state: State<'_, AppState>) -> Result<Vec<TagEntry>> {
     Ok(state
         .db()
@@ -495,7 +516,7 @@ pub fn list_tags(state: State<'_, AppState>) -> Result<Vec<TagEntry>> {
 }
 
 /// 按标签查文档
-#[tauri::command]
+#[tauri::command(async)]
 pub fn docs_by_tag(state: State<'_, AppState>, tag: String) -> Result<Vec<DocumentMeta>> {
     Ok(state
         .db()
@@ -545,9 +566,15 @@ fn pick_folder(_app: &tauri::AppHandle) -> Result<String> {
 ///
 /// 前端据此判断引擎是否可用:失败则退回浏览器 `speechSynthesis`
 /// (桌面 WebView2 下通常没有该能力,所以正常走的是本命令)。
+///
+/// 首次调用要拉起常驻 PowerShell 宿主(实测约 300ms),故走阻塞线程池,
+/// 不要占住异步运行时的工作线程。
 #[tauri::command]
-pub fn tts_voices(state: State<'_, AppState>) -> Result<Vec<tts::Voice>> {
-    state.speaker().voices()
+pub async fn tts_voices(state: State<'_, AppState>) -> Result<Vec<tts::Voice>> {
+    let speaker = state.speaker().clone();
+    tauri::async_runtime::spawn_blocking(move || speaker.voices())
+        .await
+        .map_err(|e| AppError::Io(format!("音色枚举任务异常终止: {e}")))?
 }
 
 /// 朗读一句并阻塞到结束,返回是否被中途取消。
@@ -569,24 +596,36 @@ pub async fn tts_say(
 
 /// 暂停。返回是否真的进入了暂停态(不支持暂停的平台为 false)。
 #[tauri::command]
-pub fn tts_pause(state: State<'_, AppState>) -> Result<bool> {
-    state.speaker().pause()
+pub async fn tts_pause(state: State<'_, AppState>) -> Result<bool> {
+    let speaker = state.speaker().clone();
+    tauri::async_runtime::spawn_blocking(move || speaker.pause())
+        .await
+        .map_err(|e| AppError::Io(format!("暂停任务异常终止: {e}")))?
 }
 
 /// 从暂停继续。返回是否真的继续了。
 #[tauri::command]
-pub fn tts_resume(state: State<'_, AppState>) -> Result<bool> {
-    state.speaker().resume()
+pub async fn tts_resume(state: State<'_, AppState>) -> Result<bool> {
+    let speaker = state.speaker().clone();
+    tauri::async_runtime::spawn_blocking(move || speaker.resume())
+        .await
+        .map_err(|e| AppError::Io(format!("继续任务异常终止: {e}")))?
 }
 
 /// 停止当前朗读;进行中的那句会以 `cancelled` 结束。
+///
+/// 会话尚未建立时 `cancel` 会先拉起 PowerShell(约 300ms)才能判定
+/// "是否有句在等",因此同样不能占异步线程。
 #[tauri::command]
-pub fn tts_cancel(state: State<'_, AppState>) -> Result<()> {
-    state.speaker().cancel()
+pub async fn tts_cancel(state: State<'_, AppState>) -> Result<()> {
+    let speaker = state.speaker().clone();
+    tauri::async_runtime::spawn_blocking(move || speaker.cancel())
+        .await
+        .map_err(|e| AppError::Io(format!("停止任务异常终止: {e}")))?
 }
 
 /// 该平台是否支持暂停/继续(前端据此禁用按钮)
-#[tauri::command]
+#[tauri::command(async)]
 pub fn tts_supports_pause(state: State<'_, AppState>) -> bool {
     state.speaker().pause_capable()
 }

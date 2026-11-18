@@ -80,6 +80,10 @@ fn mtime_of(meta: &fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
+/// 库根句柄。内部只有一个 `PathBuf`,克隆代价极低 ——
+/// 需要把文件操作挪出锁/主线程时,先克隆一份再放手,
+/// 避免长时间持有全局状态锁。
+#[derive(Clone)]
 pub struct Fs {
     root: PathBuf,
 }
@@ -202,15 +206,25 @@ impl Fs {
 }
 
 /// 送 Windows 回收站;非 Windows 或调用失败时返回 Err,由调用方退回直接删除
+///
+/// 注意目录与文件要用不同的 API(`DeleteDirectory` / `DeleteFile`):
+/// 对目录用 `DeleteFile` 必然抛异常,会让每次删除目录都白跑一遍
+/// PowerShell(实测约 370ms)再退回直接删除。
 #[cfg(windows)]
 fn try_recycle(abs: &Path) -> std::result::Result<(), ()> {
     let target = abs.to_string_lossy().replace('\'', "''");
-    let ps = format!(
-        "Add-Type -AssemblyName Microsoft.VisualBasic; \
-         [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('{target}','OnlyErrorDialogs','SendToRecycleBin')"
-    );
+    let call = if abs.is_dir() {
+        format!("[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory('{target}','OnlyErrorDialogs','SendToRecycleBin')")
+    } else {
+        format!("[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile('{target}','OnlyErrorDialogs','SendToRecycleBin')")
+    };
+    let ps = format!("Add-Type -AssemblyName Microsoft.VisualBasic; {call}");
     std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+        // Hidden:回收站操作不该有控制台窗口闪一下
+        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map_err(|_| ())
         .and_then(|s| if s.success() { Ok(()) } else { Err(()) })
@@ -412,6 +426,40 @@ mod tests {
     fn 列出不存在的目录返回空() {
         let dir = tmp_dir("empty");
         assert!(Fs::new(&dir).list("nope").unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 删除目录同样能走回收站路径() {
+        // 回归:try_recycle 曾对目录误用 DeleteFile,必然抛异常 →
+        // 每次删目录都白跑一次 PowerShell(约 370ms)再退回直接删除。
+        // 这里只断言「目录删除成功且不残留」,回收站可用与否都由实现兜底。
+        let dir = tmp_dir("del-dir");
+        let root = dir.join("vault");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub/a.md"), "# a").unwrap();
+
+        Fs::new(&root).delete("sub").unwrap();
+        assert!(!root.join("sub").exists(), "目录及其内容应被删除");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 删除文件后不再存在() {
+        let dir = tmp_dir("del-file");
+        fs::write(dir.join("a.md"), "# a").unwrap();
+        Fs::new(&dir).delete("a.md").unwrap();
+        assert!(!dir.join("a.md").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 克隆的库句柄指向同一目录() {
+        // Fs 可 Clone 是「把索引移出全局锁」的前提,路径必须保持一致
+        let dir = tmp_dir("clone");
+        let a = Fs::new(&dir);
+        let b = a.clone();
+        assert_eq!(a.root(), b.root());
         let _ = fs::remove_dir_all(&dir);
     }
 }

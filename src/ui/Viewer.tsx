@@ -177,10 +177,27 @@ export function Viewer() {
   /* --- 文档内查找:高亮 + 跳转 --- */
   const setFindState = useStore((s) => s.setFindState);
 
+  /**
+   * 查找词防抖。
+   *
+   * applyFind 每次都要遍历全部文本节点并 replaceChild 重建 DOM,
+   * 长文档上每敲一个键跑一遍会明显掉帧(输入跟上不上手)。
+   * 这里延迟 180ms 再生效:手速内的连续输入只落一次高亮。
+   */
+  const [activeQuery, setActiveQuery] = useState('');
+  useEffect(() => {
+    if (!findOpen) {
+      setActiveQuery('');
+      return;
+    }
+    const t = window.setTimeout(() => setActiveQuery(findQuery), 180);
+    return () => window.clearTimeout(t);
+  }, [findOpen, findQuery]);
+
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const q = findOpen ? findQuery : '';
+    const q = activeQuery;
     const session = q ? applyFind(el, q) : null;
     if (!session || session.hits.length === 0) {
       setFindState(0, 0);
@@ -208,7 +225,7 @@ export function Viewer() {
       document.removeEventListener('windmd:find-goto', onGoto);
       session.cleanup();
     };
-  }, [findOpen, findQuery, content, setFindState]);
+  }, [activeQuery, content, setFindState]);
 
   /* --- 双链点击:分发目标名(解析/创建由下方 effect 处理)--- */
   useEffect(() => {

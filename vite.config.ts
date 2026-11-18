@@ -5,6 +5,11 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   base: './',
+  // 高亮 Worker 用动态 import 按需加载语言包,必须是 ES module 格式:
+  // 默认的 iife 不支持代码分割,打包会直接失败。
+  worker: {
+    format: 'es',
+  },
   build: {
     target: 'es2022',
     // katex / shiki / mermaid 已改为动态 import,不参与首屏,阈值只用于告警

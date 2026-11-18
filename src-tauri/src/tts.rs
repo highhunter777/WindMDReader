@@ -405,26 +405,24 @@ mod host {
                 .stdout
                 .lock()
                 .map_err(|_| AppError::Io("朗读进程输出锁已损坏".into()))?;
-            loop {
-                let mut buf = String::new();
-                let n = r.read_line(&mut buf)?;
-                if n == 0 {
-                    let tail = self
-                        .stderr_tail
-                        .lock()
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_default();
-                    return Err(AppError::Io(if tail.is_empty() {
-                        "朗读进程意外退出".to_string()
-                    } else {
-                        tail
-                    }));
-                }
-                return Ok(match parse_line(&buf) {
-                    Line::Noise(_) => None,
-                    other => Some(other),
-                });
+            let mut buf = String::new();
+            let n = r.read_line(&mut buf)?;
+            if n == 0 {
+                let tail = self
+                    .stderr_tail
+                    .lock()
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                return Err(AppError::Io(if tail.is_empty() {
+                    "朗读进程意外退出".to_string()
+                } else {
+                    tail
+                }));
             }
+            Ok(match parse_line(&buf) {
+                Line::Noise(_) => None,
+                other => Some(other),
+            })
         }
 
         /// 读到握手/确认行为止。途中遇 `ERR` 直接上抛。

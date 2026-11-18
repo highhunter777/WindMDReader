@@ -177,6 +177,8 @@ async function enhance(el: HTMLElement, theme: ThemeName): Promise<void> {
     if (!codeEl) return;
     try {
       const html = await highlightCode(codeEl.textContent ?? '', lang, theme);
+      // null = Worker 不可用/出错:保留已渲染的原始文本,内容照样可读可复制
+      if (html === null) return;
       el.innerHTML = html;
       el.classList.add('code-highlighted');
       addCopyButton(el, codeEl.textContent ?? '');

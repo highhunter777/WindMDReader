@@ -546,14 +546,34 @@ async function measureContentHeight(rootHtml: string, width: number, theme: Expo
   return height;
 }
 
-/** 把正文 HTML 渲染为整页 PNG(2x 清晰度) */
+/**
+ * 画布高度上限(像素)。
+ *
+ * 浏览器对 canvas 有尺寸上限(Chromium 约 32767,且受显存限制),
+ * 超长文档按 2x 缩放后会直接超限:`drawImage`/`toBlob` 要么返回空白,
+ * 要么把进程拖死。留出余量取 30000,超限时自动降低缩放倍数。
+ */
+const CANVAS_MAX_SIDE = 30_000;
+
+/**
+ * 依据内容尺寸决定画布缩放倍数。
+ *
+ * 纯函数,便于单测:超长文档必须自动降级,否则 canvas 尺寸越界会让
+ * `drawImage`/`toBlob` 返回空白甚至把进程拖死。
+ */
+export function fitCanvasScale(width: number, height: number, desired: number): number {
+  const maxBySide = Math.min(CANVAS_MAX_SIDE / width, CANVAS_MAX_SIDE / height);
+  if (desired <= maxBySide) return desired;
+  return Math.max(0.1, maxBySide);
+}
+
+/** 把正文 HTML 渲染为整页 PNG(默认 2x 清晰度) */
 export async function htmlToPngBlob(
   bodyXml: string,
   info: ExportDocInfo,
   opts: { width: number; fontCss?: string; scale?: number },
 ): Promise<Blob> {
   const width = Math.max(320, Math.round(opts.width));
-  const scale = opts.scale ?? 2;
   // foreignObject 是隔离的渲染上下文:全部样式(基础 + 内联字体)必须随 SVG 一起嵌入
   const fullCss = buildExportCss(info.theme, info.fontSize, info.fontFamily) + (opts.fontCss ?? '');
   const rootHtml = buildExportRoot(bodyXml, info, fullCss);
@@ -562,6 +582,11 @@ export async function htmlToPngBlob(
   if (!(height > 0)) {
     throw new Error('长图导出失败:无法测量内容高度');
   }
+
+  // 先按理想倍数算,超限则自动降级(清晰度让位于"能导出成功")
+  const scale = fitCanvasScale(width, height, opts.scale ?? 2);
+  const pxW = Math.max(1, Math.round(width * scale));
+  const pxH = Math.max(1, Math.round(height * scale));
 
   const svg = buildForeignObjectSvg(rootHtml, width, height, info.theme);
   const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
@@ -573,17 +598,21 @@ export async function htmlToPngBlob(
   });
 
   const canvas = document.createElement('canvas');
-  canvas.width = Math.round(width * scale);
-  canvas.height = Math.ceil(height * scale);
+  canvas.width = pxW;
+  canvas.height = pxH;
   const ctx = canvas.getContext('2d');
   if (!ctx) {
     throw new Error('长图导出失败:无法创建画布');
   }
+  // 先铺底色:foreignObject 的透明区域在 PNG 里会变成黑色
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), 'image/png'));
+  // 及时释放大画布占用的内存
+  canvas.width = 0;
+  canvas.height = 0;
   if (!blob) {
-    throw new Error('长图导出失败:画布导出为空');
+    throw new Error('长图导出失败:画布导出为空(文档过长或内存不足,请改用 HTML/PDF 导出)');
   }
   return blob;
 }
