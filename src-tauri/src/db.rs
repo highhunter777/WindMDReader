@@ -89,6 +89,12 @@ impl Db {
                 content,
                 tokenize = "trigram"
             );
+
+            -- 键值元信息:记录上次全库扫描的时间戳等,用于判断能否跳过全量扫描
+            CREATE TABLE IF NOT EXISTS meta_kv (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             "#,
         )?;
         // 旧库迁移:documents 表补 tags 列(建表语句的 IF NOT EXISTS 不会加列)
@@ -179,6 +185,28 @@ impl Db {
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /* ---------------- 键值元信息 ---------------- */
+
+    /// 读一条元信息;不存在返回 None
+    pub fn get_kv(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT value FROM meta_kv WHERE key = ?1", params![key], |r| {
+            r.get(0)
+        })
+        .optional()
+    }
+
+    /// 写一条元信息(覆盖)
+    pub fn set_kv(&self, key: &str, value: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO meta_kv (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
     }
 
     /// 写入全文索引(先删旧条目,避免重复命中)

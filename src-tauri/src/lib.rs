@@ -14,6 +14,7 @@ mod commands;
 mod db;
 mod error;
 mod fs;
+mod index_state;
 mod indexer;
 mod links;
 mod search;

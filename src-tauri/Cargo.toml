@@ -1,10 +1,17 @@
 [package]
 name = "windmd"
-version = "0.1.3"
+version = "0.1.5"
 description = "WindMD — 本地优先、高性能的 Markdown 阅读器"
 authors = ["WindMD"]
 edition = "2021"
 rust-version = "1.77"
+# 关闭自动发现,并显式声明唯一的可执行文件:
+# src/bin/*.rs 下的性能基准脚本是临时调试产物,不该被当成独立 bin 参与构建
+autobins = false
+
+[[bin]]
+name = "windmd"
+path = "src/main.rs"
 
 [lib]
 name = "windmd_lib"

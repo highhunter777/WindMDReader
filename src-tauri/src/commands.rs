@@ -6,12 +6,21 @@
 use crate::db::{Db, DocRow};
 use crate::error::{AppError, Result};
 use crate::fs::{is_markdown, relativize, strip_ext, Fs};
-use crate::{indexer, search, tts, watcher};
+use crate::{index_state, indexer, search, tts, watcher};
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager, State};
+
+/// 失联清理的比例上限。
+///
+/// 清理是"从库里删记录"的破坏性操作,因此设两道闸门:
+/// ① 遍历出现任何错误就整体跳过(见 `walk_errors`);
+/// ② 待清理比例超过此阈值也跳过 —— 正常使用中失联文档极少,
+///    一次要删掉大比例记录,几乎必然是本次遍历不完整而非真的删了文件。
+/// 宁可留下少量脏记录,也不能误删用户的阅读进度。
+const PRUNE_MAX_RATIO: f64 = 0.2;
 
 /// 全局应用状态。
 ///
@@ -262,15 +271,67 @@ fn open_root(app: &tauri::AppHandle, state: &AppState, root: std::path::PathBuf)
     // 切库后旧任务在下一个文件处自行停止,不会把旧库的数据写进新库。
     let db = state.db().clone();
     let app_for_index = app.clone();
+    let root_for_scan = root.clone();
     std::thread::spawn(move || {
         let Some(st) = app_for_index.try_state::<AppState>() else {
             return;
         };
         let current = || st.vault_gen.load(Ordering::SeqCst) == gen;
-        let fs = Fs::new(root);
-        let _ = indexer::reindex_all(&fs, &db, &current);
-        if current() {
-            let _ = indexer::prune_missing(&fs, &db);
+
+        // 常态启动:同一个库、库根目录没被动过 → 已有索引依然可信,
+        // 直接跳过这趟约 6 秒的遍历(见 index_state 的说明)。
+        if index_state::can_skip_scan(&db, &root_for_scan) {
+            return;
+        }
+
+        let fs = Fs::new(root_for_scan.clone());
+        // 一趟扫描同时完成"增量索引"与"收集现存路径",再据此清理失联记录。
+        // 原实现是 reindex_all + prune_missing 各遍历一遍库 ——
+        // 大库(8千篇/17万文件)每次启动白扫一遍,实测约 6 秒白花。
+        match indexer::reindex_all(&fs, &db, &current) {
+            Ok(outcome) => {
+                // 被切库打断时 present 不完整,不能用它清理,否则会误删新库的索引
+                if outcome.aborted || !current() {
+                    return;
+                }
+                // 遍历出错(权限不足 / 文件被占用等)时,present 同样不完整:
+                // 失败的那些路径看起来就像"文件已删除",清理会把它们的索引
+                // 和阅读进度一起删掉。实测踩过:遍历错误静默丢弃导致误删数千篇。
+                if outcome.walk_errors > 0 {
+                    eprintln!(
+                        "[WindMD] 索引扫描有 {} 处遍历错误,本次跳过失联清理(避免误删)",
+                        outcome.walk_errors
+                    );
+                } else {
+                    // 第二道保险:待清理比例异常高时,多半是本次遍历不完整
+                    // (目录被独占、网络盘掉线等),宁可留少量脏记录也不误删。
+                    // 正常情况下失联文档只占极小比例。
+                    let stale = db.all_paths().map(|v| v.len()).unwrap_or(0);
+                    let present = outcome.present.len();
+                    let pending = stale.saturating_sub(present);
+                    let ratio = if stale == 0 { 0.0 } else { pending as f64 / stale as f64 };
+                    if stale > 0 && ratio > PRUNE_MAX_RATIO {
+                        eprintln!(
+                            "[WindMD] 待清理 {} / {} 篇({:.0}%)超出阈值,本次跳过清理(疑似遍历不完整)",
+                            pending,
+                            stale,
+                            ratio * 100.0
+                        );
+                    } else {
+                        let _ = indexer::prune_missing(&db, &outcome.present);
+                    }
+                }
+                // 记录本次扫描完成:下次启动若库根未变即可跳过
+                let _ = index_state::mark_scanned(&db, &root_for_scan, outcome.present.len());
+                // 索引较慢且只在后台发生,留一行可观测输出便于判断是否真跑过
+                eprintln!(
+                    "[WindMD] 索引扫描完成:检查 {} 篇,其中 {} 篇有变更,现存 {} 篇",
+                    outcome.scanned,
+                    outcome.indexed,
+                    outcome.present.len()
+                );
+            }
+            Err(_) => { /* 索引失败不影响使用,下次启动会重试 */ }
         }
     });
 
