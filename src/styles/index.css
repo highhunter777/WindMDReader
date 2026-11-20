@@ -255,6 +255,24 @@ input {
   color: var(--accent);
 }
 
+.icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* 编辑中:按钮保持高亮,提示「再按一次即退出」。
+   几何部分(高度/滚动)在 editor.css —— 那份随编辑器 chunk 一起加载。 */
+.icon-btn.edit-btn.active {
+  color: var(--accent);
+  background: var(--bg-active);
+}
+
+.edit-glyph {
+  font-size: 15px;
+  line-height: 1;
+  transform: translateY(-1px);
+}
+
 .doc-title {
   display: flex;
   align-items: baseline;

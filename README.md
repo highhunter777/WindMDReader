@@ -19,6 +19,18 @@
 - 划词翻译:内置离线英汉词典(词形还原 / 短语 / 中文反查);在线翻译可选,**默认零网络请求**
 - 21 项快捷键全部可在设置页重新绑定
 
+### 编辑(源码 + 分栏实时预览)
+- `Ctrl+E` 或工具栏铅笔进入分栏:左侧 Markdown 源码,右侧实时预览,分隔条可拖动
+- 输入防抖 200ms 刷新预览;两侧共用同一条渲染管线(代码高亮 / 公式 / 图表全都一致)
+- 点击预览任意段落 → 源码光标跳到对应行;移动光标 → 预览跟随滚动
+- `Ctrl+S` 立即保存,并默认 1.2s 空闲自动保存(可在设置页关闭)
+- 编辑期快捷键:`Ctrl+B/I/K` 加粗/斜体/链接,`Ctrl+1..6` 标题,`Tab` 缩进,`Enter` 续写列表
+- 外部改动保护:本地有未保存内容时不会静默覆盖,给出「保留我的修改 / 重新加载」
+- 大文档(>256KB 或 >5000 行)自动关闭实时刷新,改为手动刷新并明确提示
+
+> 编辑面是**纯 Markdown 源码**,预览是只读镜像 —— 不是 WYSIWYG。这样左右两侧
+> 永远共享同一份文本,不会出现富文本编辑器的格式漂移。
+
 ### 知识库
 - 侧栏文件树(新建 / 重命名 / 删除 / 右键菜单),选择目录即打开为库
 - 双链 `[[文档]]`、`#标签`、收藏;反向链接与标签聚合面板
@@ -73,7 +85,8 @@ pwsh scripts/bundle-release.ps1      # 打出安装器(NSIS + MSI)
 | `Ctrl+Shift+F` | 全库搜索 | `J` / `K` | 下 / 上滚动 |
 | `Ctrl+B` | 侧栏 | `G` `G` | 回到顶部 |
 | `Ctrl+Shift+B` | 右侧面板 | `Shift+G` | 回到底部 |
-| `Ctrl+E` | 切换主题 | `[` / `]` | 上 / 下一个标题 |
+| `Ctrl+E` | 进入 / 退出编辑 | `[` / `]` | 上 / 下一个标题 |
+| `Ctrl+Shift+E` | 切换主题 | `Ctrl+S` | 保存(编辑态) |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | 放大 / 缩小 / 重置字号 | `F` | 焦点行 |
 | `S` | 朗读 | `T` | 打字机 |
 | `Z` `Z` | 专注模式 | | |
@@ -83,13 +96,14 @@ pwsh scripts/bundle-release.ps1      # 打出安装器(NSIS + MSI)
 - **前端**:Vite 6 · React 18 · TypeScript(strict)· Zustand · Vitest
 - **渲染**:markdown-it · Shiki · KaTeX · Mermaid · DOMPurify
 - **后端**:Tauri 2 · Rust · SQLite(rusqlite bundled,FTS5)· notify(文件监视)
-- **质量基线**:Vitest 468 + cargo test 94 全绿,`cargo clippy` 零告警;首屏资源 349.8KB(350KB 红线内)
+- **质量基线**:Vitest 575 + cargo test 106 全绿,`cargo clippy` 零告警;首屏资源 349.8KB(350KB 红线内)
 
 ## 项目结构
 
 ```
 src/                 前端(React)
   renderer/          渲染管线:markdown / highlight / math / mermaid / export / translate ...
+  editor/            编辑:keymap(按键命令)/ session(保存与冲突)/ actions / lifecycle
   ui/                界面组件:Toolbar / Sidebar / Viewer / Outliner / SettingsPage ...
   store/             Zustand 全局状态
 src-tauri/           Rust 后端(Tauri)

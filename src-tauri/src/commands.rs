@@ -366,23 +366,42 @@ pub fn open_path(
         .to_path_buf();
 
     // 文件就在当前库里(最常见:应用已开着):不重复重建索引
-    {
+    //
+    // 但要**补一次单篇索引**。文件刚被复制/新建进库、watcher 的 300ms 静默窗
+    // 还没到时,get_meta 查不到行 → 前端标题退回「WindMD」、收藏按钮失效,
+    // 而正文却读得出来(表现为「内容对、标题错」这种半坏状态)。
+    // index_one 本身幂等(内容未变则跳过),因此常态下这步几乎无开销。
+    if let Some((fs, rel)) = {
         let guard = state.lock()?;
-        if let Some(fs) = guard.fs.as_ref() {
+        let hit = guard.fs.as_ref().and_then(|fs| {
             if same_dir(fs.root(), &parent) {
-                if let Some(rel) = relativize(fs.root(), &abs) {
-                    return Ok(OpenPathResult {
-                        vault: vault_info(fs.root(), state.db().count_docs().unwrap_or(0)),
-                        path: rel,
-                    });
-                }
+                relativize(fs.root(), &abs).map(|rel| (fs.clone(), rel))
+            } else {
+                None
             }
-        }
+        });
+        hit
+    } {
+        let db = state.db().clone();
+        indexer::index_one(&fs, &db, &rel);
+        return Ok(OpenPathResult {
+            vault: vault_info(fs.root(), db.count_docs().unwrap_or(0)),
+            path: rel,
+        });
     }
 
     let info = open_root(&app, &state, parent)?;
     let rel = relativize(std::path::Path::new(&info.root), &abs)
         .ok_or(AppError::InvalidPath(path))?;
+
+    // 同一处理:新建库的那条路会把全量索引丢到后台线程,
+    // 而这一篇恰恰是用户此刻要看的 —— 不等它,前端 get_meta 就只能拿到 None,
+    // 表现为「正文正确、标题退回 WindMD」。这里同步补这一篇(幂等,通常 <1ms)。
+    if let Ok(fs) = state.fs() {
+        let db = state.db().clone();
+        indexer::index_one(&fs, &db, &rel);
+    }
+
     Ok(OpenPathResult { vault: info, path: rel })
 }
 
@@ -724,6 +743,34 @@ mod path_tests {
         assert!(normalize_abs("a.md").is_err());
         assert!(normalize_abs(&img.to_string_lossy()).is_err());
         assert!(normalize_abs(&dir.join("missing.md").to_string_lossy()).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回归:文件刚进库(watcher 静默窗未到)时打开它,meta 必须已经就绪。
+    ///
+    /// 曾经的症状是「内容读得出来、标题却退回 WindMD、收藏按钮失效」——
+    /// 因为同一目录的早退分支直接返回,没有补索引,前端只取一次 get_meta 就空着。
+    #[test]
+    fn 同库新文件打开时补索引() {
+        let dir = tmp_dir("index-on-open");
+        let file = dir.join("new.md");
+        std::fs::write(&file, "# 新文件
+
+正文
+").unwrap();
+
+        let fs = Fs::new(&dir);
+        let db = std::sync::Arc::new(Db::open(&dir.join("index.db")).unwrap());
+
+        // 建索引前:查不到
+        assert!(db.get_meta("new.md").unwrap().is_none());
+
+        // 模拟 open_path 的补索引动作
+        indexer::index_one(&fs, &db, "new.md");
+
+        // 建索引后:标题可用
+        let row = db.get_meta("new.md").unwrap().expect("补索引后应能查到 meta");
+        assert_eq!(row.title, "new");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

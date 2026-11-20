@@ -82,8 +82,16 @@ describe('App 快捷键 — 输入态豁免', () => {
     useStore.getState().setFindOpen(true);
     const input = await screen.findByPlaceholderText(/查找/);
     input.focus();
-    fireEvent.keyDown(input, { key: 'e', ctrlKey: true });
+    // v1.1:Ctrl+E 让给编辑模式,主题切到 Ctrl+Shift+E
+    fireEvent.keyDown(input, { key: 'E', ctrlKey: true, shiftKey: true });
     expect(useStore.getState().theme).toBe('dark'); // 初始 light → 切换后 dark
+  });
+
+  it('Ctrl+E 不再切换主题(v1.1 让给编辑)', async () => {
+    await renderApp();
+    const before = useStore.getState().theme;
+    fireEvent.keyDown(window, { key: 'e', ctrlKey: true });
+    expect(useStore.getState().theme).toBe(before);
   });
 });
 

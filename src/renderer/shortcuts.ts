@@ -32,13 +32,14 @@ export type ShortcutAction =
   | 'zen'
   | 'focus-line'
   | 'typewriter'
-  | 'speak';
+  | 'speak'
+  | 'toggle-edit';
 
 export interface ActionMeta {
   /** 设置页中的显示名 */
   name: string;
   /** 分组(设置页分节) */
-  group: '文件与面板' | '阅读导航' | '阅读模式' | '排版与导出';
+  group: '文件与面板' | '阅读导航' | '阅读模式' | '编辑' | '排版与导出';
   hint?: string;
 }
 
@@ -48,7 +49,7 @@ export const DEFAULT_BINDINGS: Record<ShortcutAction, string> = {
   'global-search': 'ctrl+shift+f',
   'toggle-sidebar': 'ctrl+b',
   'toggle-toc': 'ctrl+shift+b',
-  'toggle-theme': 'ctrl+e',
+  'toggle-theme': 'ctrl+shift+e',
   'zoom-in': 'ctrl+=',
   'zoom-out': 'ctrl+-',
   'zoom-reset': 'ctrl+0',
@@ -64,6 +65,7 @@ export const DEFAULT_BINDINGS: Record<ShortcutAction, string> = {
   'focus-line': 'f',
   typewriter: 't',
   speak: 's',
+  'toggle-edit': 'ctrl+e',
 };
 
 export const ACTION_META: Record<ShortcutAction, ActionMeta> = {
@@ -83,7 +85,8 @@ export const ACTION_META: Record<ShortcutAction, ActionMeta> = {
   'focus-line': { name: '焦点行', group: '阅读模式', hint: '淡出非当前段落' },
   typewriter: { name: '打字机', group: '阅读模式', hint: '当前段对齐视口锚点行' },
   speak: { name: '朗读', group: '阅读模式' },
-  'toggle-theme': { name: '切换主题', group: '排版与导出' },
+  'toggle-edit': { name: '编辑模式', group: '编辑', hint: '分栏:左源码 / 右预览' },
+  'toggle-theme': { name: '切换主题', group: '排版与导出', hint: '原 Ctrl+E 已让给编辑' },
   'zoom-in': { name: '放大字号', group: '排版与导出' },
   'zoom-out': { name: '缩小字号', group: '排版与导出' },
   'zoom-reset': { name: '重置字号', group: '排版与导出' },
@@ -108,6 +111,7 @@ export const ACTION_ORDER: ShortcutAction[] = [
   'focus-line',
   'typewriter',
   'speak',
+  'toggle-edit',
   'toggle-theme',
   'zoom-in',
   'zoom-out',
@@ -176,6 +180,29 @@ export function comboOwner(
     if (bindings[a] === combo) return a;
   }
   return null;
+}
+
+/**
+ * 迁移旧版绑定:`toggle-theme` 的默认值从 `ctrl+e` 改为 `ctrl+shift+e`
+ * (Ctrl+E 让给编辑模式)。
+ *
+ * 只在用户**没有主动改过**主题键时才迁移:存的就是旧默认值
+ * `ctrl+e`,说明他只是接受了默认,应跟随新默认;如果他特意绑了别的组合,
+ * 那是明确意图,不能动。同理,新动作 `toggle-edit` 拿到默认 `ctrl+e`。
+ *
+ * 返回被改写后的绑定对象;无需迁移时原样返回。
+ */
+export function migrateBindings(
+  saved: Record<string, unknown>,
+  defaults: Record<ShortcutAction, string>,
+): Record<string, unknown> {
+  const out = { ...saved };
+  if (out['toggle-theme'] === 'ctrl+e') out['toggle-theme'] = defaults['toggle-theme'];
+  // 旧版本没有这个动作;若用户手工绑了同名键,保留他的选择
+  if (typeof out['toggle-edit'] !== 'string') out['toggle-edit'] = defaults['toggle-edit'];
+  // 迁移后新值与原 `ctrl+e` 撞车时,把编辑让开(否则两个动作抢同一个键)
+  if (out['toggle-edit'] === out['toggle-theme']) out['toggle-edit'] = defaults['toggle-edit'];
+  return out;
 }
 
 /** 序列匹配的宽限窗口(毫秒) */

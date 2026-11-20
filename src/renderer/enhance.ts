@@ -38,7 +38,7 @@ export function preloadSanitizer(): void {
 export const sanitizeHtml = async (html: string): Promise<string> => {
   const mod = await loadSanitizer();
   return mod.default.sanitize(html, {
-    ADD_ATTR: ['data-tex', 'data-mid', 'data-lang', 'target'],
+    ADD_ATTR: ['data-tex', 'data-mid', 'data-lang', 'data-src-line', 'target'],
     ADD_TAGS: ['math-inline'], // 自定义标签仅作为定位符,内部无用户内容
   });
 };

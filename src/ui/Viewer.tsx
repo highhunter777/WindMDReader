@@ -23,6 +23,12 @@ import { Welcome } from './Welcome';
  */
 const TranslateBubble = lazy(() => import('./TranslateBubble'));
 
+/**
+ * 编辑器懒加载:它连带 keymap/session 与编辑器样式,只在进入编辑时下载。
+ * 首屏红线只剩 0.2KB,不能把源码编辑能力压进 entry。
+ */
+const EditorPane = lazy(() => import('./EditorPane'));
+
 export function Viewer() {
   const containerRef = useRef<HTMLDivElement>(null);
   const content = useStore((s) => s.content);
@@ -36,13 +42,15 @@ export function Viewer() {
   const findQuery = useStore((s) => s.findQuery);
   const focusLine = useStore((s) => s.focusLine);
   const typewriter = useStore((s) => s.typewriter);
+  const editing = useStore((s) => s.editing);
   const setHeadings = useStore((s) => s.setHeadings);
   const setRenderMs = useStore((s) => s.setRenderMs);
 
   /* --- 渲染 --- */
   useEffect(() => {
     const el = containerRef.current;
-    if (!el) return;
+    // 编辑态由 EditorPane 自己的预览管线负责渲染,这里不重复渲染
+    if (!el || editing) return;
     const t0 = performance.now();
     const { html, headings } = renderMarkdown(content);
     setRenderMs(Math.round(performance.now() - t0));
@@ -81,24 +89,31 @@ export function Viewer() {
       window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [content, activePath]);
+  }, [content, activePath, editing]);
 
   /* --- 主题切换时重挂载(代码高亮/公式需按主题重渲染) --- */
   useEffect(() => {
     const el = containerRef.current;
-    if (!el) return;
+    if (!el || editing) return;
     const { html } = renderMarkdown(content);
     const cleanup = mountRendered(el, html, themeToShiki(theme));
     return cleanup;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [theme]);
 
+  /* --- 进入编辑:先把阅读位置让给编辑器,退出时由恢复逻辑接回 --- */
+  useEffect(() => {
+    if (!editing) return;
+    // 焦点行/打字机按段落计算,分栏下会误伤预览侧(store 里已关,这里兜底一次)
+    return () => undefined;
+  }, [editing]);
+
   /* --- 焦点行 / 打字机模式 ---
      常驻监听;开关变化时重挂一次,让新模式立刻定位当前块
      (仅靠滚动事件的话,开启的瞬间没有事件,焦点块会缺一帧)。 */
   useEffect(() => {
     const el = containerRef.current;
-    if (!el) return;
+    if (!el || editing) return;
     return mountFocus({
       container: el,
       getMode: () => {
@@ -107,7 +122,7 @@ export function Viewer() {
       },
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [content, activePath, focusLine, typewriter]);
+  }, [content, activePath, focusLine, typewriter, editing]);
 
   /* --- TOC 滚动高亮 --- */
   const activeId = useRef<string | null>(null);
@@ -139,7 +154,7 @@ export function Viewer() {
   const lastReport = useRef(0);
   useEffect(() => {
     const scroller = scrollContainer();
-    if (!scroller || !activePath) return;
+    if (!scroller || !activePath || editing) return;
     const onScroll = () => {
       // 滚动时就地记下该篇的位置:像素(会话内恢复)+ 百分比(落库)。
       // 不能在切文档的 cleanup 里补算 —— 那时 DOM 已是新文档,高度不对。
@@ -157,7 +172,7 @@ export function Viewer() {
     };
     scroller.addEventListener('scroll', onScroll, { passive: true });
     return () => scroller.removeEventListener('scroll', onScroll);
-  }, [activePath]);
+  }, [activePath, editing]);
 
   /* --- 切换文档/卸载时把最后位置落库 --- */
   useEffect(() => {
@@ -196,7 +211,7 @@ export function Viewer() {
 
   useEffect(() => {
     const el = containerRef.current;
-    if (!el) return;
+    if (!el || editing) return;
     const q = activeQuery;
     const session = q ? applyFind(el, q) : null;
     if (!session || session.hits.length === 0) {
@@ -225,7 +240,7 @@ export function Viewer() {
       document.removeEventListener('windmd:find-goto', onGoto);
       session.cleanup();
     };
-  }, [activeQuery, content, setFindState]);
+  }, [activeQuery, content, setFindState, editing]);
 
   /* --- 双链点击:分发目标名(解析/创建由下方 effect 处理)--- */
   useEffect(() => {
@@ -340,6 +355,17 @@ export function Viewer() {
     idle(() => void import('./TranslateBubble'));
     return () => undefined;
   }, []);
+
+  /* 编辑态:整块换成编辑器(分栏),阅读态的全部逻辑在上面被 editing 短路 */
+  if (editing && activePath) {
+    return (
+      <div className="viewer viewer-edit">
+        <Suspense fallback={<div className="editor-loading">正在准备编辑器…</div>}>
+          <EditorPane />
+        </Suspense>
+      </div>
+    );
+  }
 
   /* 无文档打开(未开库 / 空库 / 删掉了当前篇):展示欢迎页引导下一步 */
   if (!activePath) {

@@ -16,20 +16,66 @@ import {
 } from './renderer/shortcuts';
 import { Toolbar } from './ui/Toolbar';
 import { FindBar } from './ui/FindBar';
-import { Lightbox } from './ui/Lightbox';
+
 import { Sidebar } from './ui/Sidebar';
 import { Viewer } from './ui/Viewer';
 import { Outliner } from './ui/Outliner';
 import { StatusBar } from './ui/StatusBar';
 import { ErrorBoundary } from './ui/ErrorBoundary';
+import { decideExternalChange } from './editor/external';
+
+/**
+ * 灯箱按需挂载:
+ * 它只在「点开一张图片」时才出现,属于典型的用户主动触发能力。
+ * 但不能纯粹 `lazy` —— 不挂载就没人监听 `windmd:lightbox-open`,
+ * 点击事件会丢。所以这里先只挂一个极轻的监听器,收到事件才把组件拉进来。
+ */
+function LazyLightbox() {
+  // 有组件实例即代表「已开始挂载」,无需再单独记一个 armed 标志
+  const [Comp, setComp] = useState<null | React.ComponentType>(null);
+
+  useEffect(() => {
+    const onOpen = (e: Event) => {
+      void import('./ui/Lightbox').then((m) => {
+        // 首击的 detail 先存起来:组件挂载后再消费(见 Lightbox.stashPendingOpen)
+        m.stashPendingOpen((e as CustomEvent<{ src: string; alt: string }>).detail);
+        setComp(() => m.Lightbox);
+      });
+    };
+    document.addEventListener('windmd:lightbox-open', onOpen, { once: true });
+    return () => document.removeEventListener('windmd:lightbox-open', onOpen);
+  }, []);
+
+  return Comp ? <Comp /> : null;
+}
 
 /** 设置页懒加载:用户主动触发才用,不进首屏 */
 const SettingsPage = lazy(() => import('./ui/SettingsPage'));
+
+/**
+ * 切换编辑态。三条约束:
+ * ① 进编辑要求有文档;
+ * ② 退编辑必须先把草稿落盘(保存失败就留在编辑态,不静默丢内容);
+ * ③ 切换是懒加载的:编辑器 chunk 只在第一次进入编辑时下载。
+ */
+async function toggleEditing(): Promise<void> {
+  const s = useStore.getState();
+  if (!s.activePath) return;
+  if (!s.editing) {
+    // 进入编辑的处理随编辑器 chunk 加载(首屏不含)
+    const m = await import('./editor/actions');
+    m.startEditing();
+    return;
+  }
+  const { exitEditing } = await import('./ui/EditorPane');
+  await exitEditing();
+}
 
 export default function App() {
   const theme = useStore((s) => s.theme);
   const activePath = useStore((s) => s.activePath);
   const zen = useStore((s) => s.zen);
+  const editing = useStore((s) => s.editing);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   /* --- 主题属性 --- */
@@ -97,19 +143,35 @@ export default function App() {
     let unlistener: (() => void) | undefined;
     void getBackend().then((b) => {
       unlistener = b.onFileChanged((paths) => {
-        const active = useStore.getState().activePath;
-        if (active && paths.includes(active)) {
-          void b
-            .readFile(active)
-            .then((f) => {
-              if (useStore.getState().activePath === active) {
-                useStore.getState().openDoc(f.path, f.content, useStore.getState().meta);
-              }
-            })
-            .catch(() => {
-              // 文件已在外部被删除/改名:树会随即刷新,正文保持现状即可
-            });
-        }
+        const state = useStore.getState();
+        const active = state.activePath;
+        if (!active || !paths.includes(active)) return;
+        void b
+          .readFile(active)
+          .then((f) => {
+            const s2 = useStore.getState();
+            if (s2.activePath !== active) return;
+            if (!s2.editing) {
+              s2.openDoc(f.path, f.content, s2.meta);
+              return;
+            }
+            // 编辑态:区分「自己的保存」与「外部修改」,不能一律重载 ——
+            // 重载会把用户正在写的草稿冲掉。
+            const verdict = decideExternalChange(
+              {
+                draft: s2.draft,
+                baseline: s2.baseline,
+                lastWritten: s2.lastWritten,
+                saving: s2.saving,
+              },
+              f.content,
+            );
+            if (verdict === 'reload') s2.openDoc(f.path, f.content, s2.meta);
+            else if (verdict === 'conflict') s2.setConflict({ incoming: f.content });
+          })
+          .catch(() => {
+            // 文件已在外部被删除/改名:树会随即刷新,正文保持现状即可
+          });
       });
     });
     return () => unlistener?.();
@@ -159,6 +221,9 @@ export default function App() {
           break;
         case 'open-settings':
           setSettingsOpen(true);
+          break;
+        case 'toggle-edit':
+          void toggleEditing();
           break;
         case 'scroll-down':
           sc?.scrollBy({ top: 48, behavior: 'smooth' });
@@ -218,11 +283,19 @@ export default function App() {
       if (e.key === 'Escape') {
         if (s.zen) s.toggleZen();
         s.setFindOpen(false);
+        // 编辑态 Esc:先落盘再退出(内容不丢);冲突条也一并收起
+        if (s.editing) {
+          void toggleEditing();
+          return;
+        }
         return;
       }
 
       const target = e.target as HTMLElement;
       const inInput = /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName) || target.isContentEditable;
+      // 编辑器的按键由 EditorPane 自己处理并 stopPropagation;走到这里说明是未拦截的键,
+      // 但纯键仍不能触发阅读快捷键(否则打字时 j/k 会滚动预览)
+
       const bindings = s.bindings;
       const combo = comboOf(e);
       if (!combo) return;
@@ -267,7 +340,7 @@ export default function App() {
   }, []);
 
   return (
-    <div className={`app ${zen ? 'app-zen' : ''}`}>
+    <div className={`app ${zen ? 'app-zen' : ''} ${editing ? 'app-editing' : ''}`}>
       <Toolbar />
       <FindBar />
       <div className="app-body">
@@ -286,7 +359,7 @@ export default function App() {
         </ErrorBoundary>
       </div>
       <StatusBar />
-      <Lightbox />
+      <LazyLightbox />
       {settingsOpen && (
         <Suspense fallback={null}>
           <SettingsPage onClose={() => setSettingsOpen(false)} />

@@ -32,6 +32,22 @@ const ExportMenu = lazy(() => import('./ExportMenu'));
  */
 const SpeakMenu = lazy(() => import('./SpeakMenu'));
 
+/**
+ * 切换编辑态:与 App 里的 Ctrl+E 走同一条路径。
+ * 这里内联一份而不是从 App 导出,是为了不让工具栏反向依赖 App(会成环)。
+ */
+async function toggleEditing(): Promise<void> {
+  const s = useStore.getState();
+  if (!s.activePath) return;
+  if (!s.editing) {
+    const m = await import('../editor/actions');
+    m.startEditing();
+    return;
+  }
+  const { exitEditing } = await import('./EditorPane');
+  await exitEditing();
+}
+
 function preload(idleCb: () => void) {
   const idle = (window as unknown as { requestIdleCallback?: (cb: () => void, o?: object) => void })
     .requestIdleCallback;
@@ -57,6 +73,7 @@ export function Toolbar() {
   const theme = useStore((s) => s.theme);
   const themeMode = useStore((s) => s.themeMode);
   const zen = useStore((s) => s.zen);
+  const editing = useStore((s) => s.editing);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
   const tocVisible = useStore((s) => s.tocVisible);
   const panelTab = useStore((s) => s.panelTab);
@@ -127,6 +144,17 @@ export function Toolbar() {
         >
           <Search size={16} />
         </button>
+        {/* 编辑入口:与 Ctrl+E 等价。放在排版旁,因为「写」和「排版」同属正文操作 */}
+        <button
+          className={`icon-btn edit-btn ${editing ? 'active' : ''}`}
+          title={editing ? '退出编辑 (Ctrl+E)' : '编辑 (Ctrl+E)'}
+          disabled={!activePath}
+          onClick={() => void toggleEditing()}
+        >
+          {/* 用字符而非图标库:lucide 是整包 tree-shake 后的常量,多一个图标
+              就要多带一小段路径数据,而首屏贴着红线(余量 0.6KB) */}
+          <span aria-hidden className="edit-glyph">✎</span>
+        </button>
         <FontSizePicker />
         <FocusMenu />
         <Suspense fallback={null}>
@@ -145,7 +173,14 @@ export function Toolbar() {
         <button className="icon-btn zen-btn" title="专注模式 (z z)" onClick={() => useStore.getState().toggleZen()}>
           <Focus size={16} />
         </button>
-        <button className="icon-btn" title="大纲 (Ctrl+Shift+B)" onClick={() => setTocVisible(!tocVisible)}>
+        {/* 编辑态右侧大纲是收起的(分栏要宽度),此时按钮按下没有可见效果,
+            置灰比留一个「点了没反应」的按钮诚实 */}
+        <button
+          className="icon-btn"
+          title={editing ? '编辑时大纲隐藏' : '大纲 (Ctrl+Shift+B)'}
+          disabled={editing}
+          onClick={() => setTocVisible(!tocVisible)}
+        >
           <PanelRight size={16} />
         </button>
         <button

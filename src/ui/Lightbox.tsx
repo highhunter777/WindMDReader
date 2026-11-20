@@ -10,6 +10,25 @@ interface LightboxState {
   alt: string;
 }
 
+/**
+ * 首次点击的暂存区。
+ *
+ * 灯箱是懒加载的:App 只挂一个轻监听器接住 `windmd:lightbox-open`
+ * 并开始下载组件。那一次点击必须缓存,否则等组件挂载完事件已经过去了。
+ */
+let pendingOpen: LightboxState | null = null;
+
+/** 暂存首击(App 的轻监听器调用) */
+export function stashPendingOpen(state: LightboxState): void {
+  pendingOpen = state;
+}
+
+function takePendingOpen(): LightboxState | null {
+  const v = pendingOpen;
+  pendingOpen = null;
+  return v;
+}
+
 export function Lightbox() {
   const [state, setState] = useState<LightboxState | null>(null);
   const [zoom, setZoom] = useState(1);
@@ -36,6 +55,10 @@ export function Lightbox() {
       setRotate(0);
     };
     document.addEventListener('windmd:lightbox-open', onOpen);
+    // 组件是懒加载的:App 侧那个「预挂监听」会把**第一次**点击消费掉
+    // 并把 detail 暂存下来,这里挂载后立刻取走,否则首击丢图。
+    const pending = takePendingOpen();
+    if (pending) onOpen(new CustomEvent('windmd:lightbox-open', { detail: pending }));
     return () => document.removeEventListener('windmd:lightbox-open', onOpen);
   }, []);
 

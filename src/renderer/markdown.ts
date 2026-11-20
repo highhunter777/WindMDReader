@@ -21,6 +21,17 @@ export interface RenderedDoc {
   headings: Heading[];
 }
 
+/** 渲染选项 */
+export interface RenderOptions {
+  /**
+   * 给顶层块注入 `data-src-line`(源码起始行,0 基)。
+   *
+   * 只有编辑器预览需要它(源码 ↔ 预览互跳),默认关闭 ——
+   * 关掉才能保证 CommonMark 652 例的 HTML 比对不受影响。
+   */
+  lineMap?: boolean;
+}
+
 interface RenderEnv {
   /** Mermaid 源码收集表:data-mid → 源码 */
   mermaidSources: Record<number, string>;
@@ -204,9 +215,29 @@ const md = buildMd();
 
 /* ---------------- 渲染入口 ---------------- */
 
-export function renderMarkdown(source: string): RenderedDoc {
+/** 需要携带源码行号的块级 token(容器类取 open 端) */
+const LINE_MAP_TOKENS = new Set([
+  'heading_open',
+  'paragraph_open',
+  'blockquote_open',
+  'bullet_list_open',
+  'ordered_list_open',
+  'list_item_open',
+  'table_open',
+  'fence',
+  'math_block',
+  'hr',
+  'html_block',
+]);
+
+export function renderMarkdown(source: string, options: RenderOptions = {}): RenderedDoc {
   const env: RenderEnv = { mermaidSources: {}, mermaidCount: 0 };
   const tokens = md.parse(source, env);
+  if (options.lineMap) {
+    for (const t of tokens) {
+      if (t.map && LINE_MAP_TOKENS.has(t.type)) t.attrSet('data-src-line', String(t.map[0]));
+    }
+  }
   const html = md.renderer.render(tokens, md.options, env);
 
   // 挂到全局供 mermaid.ts 懒加载取用

@@ -1,0 +1,311 @@
+/* ============================================================
+   编辑分栏(左源码 / 右预览)
+   独立 CSS 文件:只在编辑器 chunk 里加载,不占首屏样式。
+   ============================================================ */
+
+/* ------------------------------------------------------------
+   编辑态对宿主布局的接管
+   ------------------------------------------------------------
+   必须给死高度(height:100% + overflow:hidden):textarea 是 flex:1 的,
+   若容器高度由内容撑开,它会一直长下去 —— 表现为「整个页面在滚」
+   而不是「面板内滚」,两侧的滚动条与滚动同步就全失效了。 */
+.viewer.viewer-edit {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  justify-content: flex-start;
+}
+
+/* `.main` 本来是滚动容器,编辑态改由编辑器自己管 */
+.main:has(.viewer-edit) {
+  overflow: hidden;
+}
+
+/* 编辑时收起右侧大纲:分栏已经把宽度吃满,再留 220px 会把预览挤成
+   不到半屏(实测 415px,代码块只能横向滚)。大纲在这一屏也用不上。 */
+.app-editing .outliner {
+  display: none;
+}
+
+.editor-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.editor-split {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* 外部修改冲突:编辑区顶部横条,不遮挡源码 */
+.editor-conflict {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: #8a5a00;
+  background: var(--callout-warn-bg);
+  border-bottom: 1px solid var(--callout-warn-border);
+}
+
+.editor-conflict-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.editor-conflict-btn {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--fg);
+  border: 1px solid var(--callout-warn-border);
+  background: var(--bg);
+}
+
+.editor-conflict-btn:hover {
+  background: var(--bg-hover);
+}
+
+.editor-conflict-btn.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.editor-conflict-btn.primary:hover {
+  filter: brightness(1.05);
+}
+
+.editor-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+
+/* 分栏比例由 data-split 承载(30~70),两侧都用百分比,拖动时不跳 */
+.editor-source {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  width: calc(var(--split, 50) * 1%);
+  flex: 0 0 auto;
+  border-right: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+
+.editor-preview {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  background: var(--bg);
+}
+
+.editor-bar {
+  height: 30px;
+  flex: 0 0 30px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.editor-preview .editor-bar {
+  background: var(--bg);
+}
+
+.editor-bar-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 600;
+  color: var(--fg-muted);
+  letter-spacing: 0.02em;
+}
+
+.editor-bar-meta {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-faint);
+}
+
+.editor-bar-spacer {
+  flex: 1;
+  min-width: 4px;
+}
+
+.editor-save-state {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.editor-save-state.dirty {
+  color: var(--accent);
+}
+
+.editor-save-state.error {
+  color: #e5534b;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- 源码 --- */
+
+.editor-input {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  border: 0;
+  outline: none;
+  padding: 16px 16px 45vh;
+  background: transparent;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  line-height: 1.65;
+  tab-size: 2;
+  caret-color: var(--accent);
+}
+
+.editor-input::placeholder {
+  color: var(--fg-faint);
+}
+
+/* --- 分隔条 --- */
+
+.editor-divider {
+  flex: 0 0 7px;
+  position: relative;
+  cursor: col-resize;
+  background: var(--bg-sunken);
+  touch-action: none;
+}
+
+.editor-divider::after {
+  content: '';
+  position: absolute;
+  inset: 0 3px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+
+.editor-divider:hover::after,
+.editor-divider:active::after {
+  background: var(--accent);
+  opacity: 0.55;
+}
+
+/* --- 预览 --- */
+
+.editor-preview-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  justify-content: center;
+  padding: 24px 24px 45vh;
+}
+
+/* 预览是「只读镜像」:任务列表的复选框必须不可交互 ——
+   点一下视觉上勾上了、源码却没变,是最容易骗人的那类假象。
+   要改勾选状态就改源码里的 [ ] / [x]。 */
+.editor-prose .task-list-item input[type='checkbox'],
+.editor-prose .task-list-item label {
+  pointer-events: none;
+}
+
+.editor-prose .task-list-item-checkbox {
+  opacity: 0.75;
+}
+
+/* 预览里的块可点击跳转到源码行:给出可点的视觉暗示 */
+.editor-prose [data-src-line] {
+  position: relative;
+  cursor: text;
+}
+
+.editor-prose [data-src-line]:hover {
+  background: var(--bg-hover);
+  border-radius: 3px;
+  box-shadow: -6px 0 0 var(--bg-hover), 6px 0 0 var(--bg-hover);
+}
+
+.editor-degraded {
+  color: #c08a1a;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 45%;
+}
+
+.editor-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: var(--radius);
+  font-size: 11px;
+  color: var(--accent);
+  background: var(--bg-active);
+}
+
+.editor-refresh:hover {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.editor-source {
+  width: calc(var(--split, 50) * 1%);
+}
+
+/* 窄窗口:分栏改为上下堆叠,否则源码区只剩几十像素 */
+@media (max-width: 900px) {
+  .editor-split {
+    flex-direction: column;
+  }
+
+  .editor-source {
+    width: 100%;
+    height: var(--split, 50%);
+    flex: 0 0 auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .editor-divider {
+    flex: 0 0 7px;
+    cursor: row-resize;
+  }
+
+  .editor-divider::after {
+    inset: 3px 0;
+  }
+
+  .editor-preview {
+    flex: 1;
+  }
+}

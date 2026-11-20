@@ -7,6 +7,7 @@ import type { Heading } from '../renderer/markdown';
 import {
   ACTION_ORDER,
   DEFAULT_BINDINGS,
+  migrateBindings,
   type ShortcutAction,
 } from '../renderer/shortcuts';
 
@@ -72,6 +73,31 @@ interface WindMDState {
   /* --- 快捷键绑定(设置页可改键) --- */
   bindings: Record<ShortcutAction, string>;
 
+  /* --- 编辑(v1.1) ---
+     分栏:左源码右预览。`content` 是**已渲染**的正文来源(打开/刷新时写入),
+     `draft` 是编辑中的源码,`previewSource` 是预览实际使用的快照 ——
+     两者分离才能做到「输入不打断阅读、预览按防抖更新」。 */
+  editing: boolean;
+  /** 编辑中的源码;未编辑时与 content 相同 */
+  draft: string;
+  /** 预览当前渲染所用的源码(防抖后) */
+  previewSource: string;
+  /** 与磁盘一致的基准内容:用于判断脏、以及区分「自己保存」与「外部修改」 */
+  baseline: string;
+  /** 最近一次自己写入的内容(watcher 回环抑制) */
+  lastWritten: string | null;
+  dirty: boolean;
+  saving: boolean;
+  saveError: string;
+  /** 最近一次成功保存的时间戳 */
+  savedAt: number;
+  /** 外部修改冲突:磁盘有变化而本地有未保存改动 */
+  conflict: { incoming: string } | null;
+  /** 自动保存开关(默认开) */
+  autoSave: boolean;
+  /** 分栏比例:源码面板宽度百分比,30~70 */
+  splitRatio: number;
+
   /* --- Actions --- */
   setVault(v: VaultInfo | null): void;
   openDoc(path: string, content: string, meta: DocumentMeta | null): void;
@@ -107,6 +133,17 @@ interface WindMDState {
   setTranslateApiKey(v: string): void;
   setBinding(action: ShortcutAction, combo: string): void;
   resetBindings(): void;
+
+  /* --- 编辑 ---
+     只保留纯 setter:进入/退出编辑、草稿、保存回写这些**有逻辑**的动作
+     放在 editor/actions.ts,随编辑器 chunk 按需加载。
+     原因很实际:首屏红线只剩 0.2KB,而 App 只需要 setConflict 分流 watcher。 */
+  setSaving(v: boolean): void;
+  setSaveError(msg: string): void;
+  setConflict(c: { incoming: string } | null): void;
+  setAutoSave(v: boolean): void;
+  setSplitRatio(n: number): void;
+
 }
 
 const saved = {
@@ -122,6 +159,8 @@ const saved = {
   translateModel: localStorage.getItem('windmd-translate-model') ?? '',
   translateApiKey: localStorage.getItem('windmd-translate-key') ?? '',
   outlinerTab: (localStorage.getItem('windmd-outliner-tab') as OutlinerTab | null) ?? 'toc',
+  autoSave: localStorage.getItem('windmd-autosave') !== '0',
+  splitRatio: clampRatio(Number(localStorage.getItem('windmd-split') ?? 50)),
 };
 
 /** 系统是否深色(无 matchMedia 的环境按浅色) */
@@ -152,6 +191,12 @@ function clampRate(n: number): number {
   return Math.max(-10, Math.min(10, Math.round(n)));
 }
 
+/** 分栏比例限幅:两侧都不能被拖到看不见 */
+export function clampRatio(n: number): number {
+  if (!Number.isFinite(n)) return 50;
+  return Math.max(30, Math.min(70, Math.round(n)));
+}
+
 /**
  * 读取快捷键绑定:localStorage 覆盖 + 默认合并。
  * 合并而非替换 —— 新增动作自动拿到默认绑定,旧配置不失效;
@@ -162,7 +207,9 @@ function loadBindings(): Record<ShortcutAction, string> {
   try {
     const raw = localStorage.getItem('windmd-keys');
     if (raw) {
-      const saved = JSON.parse(raw) as Record<string, unknown>;
+      // 先做版本迁移:旧默认 ctrl+e(主题)要换成 ctrl+shift+e,
+      // 并把 ctrl+e 交给新增的编辑动作
+      const saved = migrateBindings(JSON.parse(raw) as Record<string, unknown>, DEFAULT_BINDINGS);
       for (const a of ACTION_ORDER) {
         const v = saved[a];
         if (typeof v === 'string' && v.trim()) out[a] = v.trim().toLowerCase();
@@ -208,12 +255,44 @@ export const useStore = create<WindMDState>((set, get) => ({
   translateApiKey: saved.translateApiKey,
   bindings: loadBindings(),
 
+  editing: false,
+  draft: '',
+  previewSource: '',
+  baseline: '',
+  lastWritten: null,
+  dirty: false,
+  saving: false,
+  saveError: '',
+  savedAt: 0,
+  conflict: null,
+  autoSave: saved.autoSave,
+  splitRatio: saved.splitRatio,
+
   // 记住上次库路径,重启后免去重新选择(路径失效时由启动流程回退到选择框)
   setVault: (v) => {
     if (v) localStorage.setItem('windmd-vault', v.root);
     set({ vault: v });
   },
-  openDoc: (path, content, meta) => set({ activePath: path, content, meta }),
+  // 切文档:草稿/基准/冲突/错误全部归位到新文档。
+  // **不清 editing** —— 编辑是一种「工作模式」,连着改几篇不该每篇都重新进一次;
+  // 只有文档被关掉(path 为空)时才退回阅读态。切走前的落盘由 App 层的
+  // subscribe 负责(它拿着旧路径与旧草稿,那时 store 已是新文档)。
+  openDoc: (path, content, meta) =>
+    set((s) => ({
+      activePath: path,
+      content,
+      meta,
+      draft: content,
+      previewSource: content,
+      baseline: content,
+      lastWritten: null,
+      dirty: false,
+      saving: false,
+      saveError: '',
+      savedAt: 0,
+      conflict: null,
+      editing: path ? s.editing : false,
+    })),
   setMeta: (meta) => set({ meta }),
   setHeadings: (headings) => set({ headings }),
   setRecent: (recentFiles) => set({ recentFiles }),
@@ -307,6 +386,20 @@ export const useStore = create<WindMDState>((set, get) => ({
   resetBindings: () => {
     localStorage.removeItem('windmd-keys');
     set({ bindings: { ...DEFAULT_BINDINGS } });
+  },
+
+  /* --- 编辑:纯 setter --- */
+  setSaving: (v) => set({ saving: v }),
+  setSaveError: (msg) => set({ saveError: msg, saving: false }),
+  setConflict: (c) => set({ conflict: c }),
+  setAutoSave: (v) => {
+    localStorage.setItem('windmd-autosave', v ? '1' : '0');
+    set({ autoSave: v });
+  },
+  setSplitRatio: (n) => {
+    const v = clampRatio(n);
+    localStorage.setItem('windmd-split', String(v));
+    set({ splitRatio: v });
   },
 }));
 
